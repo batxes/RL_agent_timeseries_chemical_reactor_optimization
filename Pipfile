@@ -11,9 +11,16 @@ seaborn = "*"
 scipy = "*"
 scikit-learn = "*"
 tensorflow = "*"
+torch = "*"
+numpy = "*"
+kafka-python = "*"
+prometheus-client = "*"
+grafana-api = "*"
+streamlit = "*"
+gymnasium = "*"
+stable-baselines3 = {extras = ["extra"], version = "*"}
 
 [dev-packages]
-ipykernel = "*"
 
 [requires]
 python_version = "3.12"

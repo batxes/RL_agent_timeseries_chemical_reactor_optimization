@@ -1,5 +1,5 @@
 import os
-from src.data_processing import load_and_preprocess_data, process_data_for_training
+from src.data_processing import load_and_preprocess_data, process_data_for_training, add_time_features, add_rolling_features, add_lag_features
 from src.model import train_final_lstm_model_relu
 from src.evaluation import validation_metrics_plot, predict_and_evaluate_model
 from keras.models import load_model
@@ -10,6 +10,11 @@ def main():
     cleaned_data = load_and_preprocess_data("data/Daten_juna.csv")
 
     def load_train_predict_evaluate(reactor, target_variable):
+
+        cleaned_data = add_time_features(cleaned_data)
+        cleaned_data = add_rolling_features(cleaned_data, target_col=target_variable)
+        cleaned_data = add_lag_features(cleaned_data, target_col=target_variable)
+
         #reactor = 2
         #target_variable = "2|CB"
         if target_variable.endswith("|CB"):

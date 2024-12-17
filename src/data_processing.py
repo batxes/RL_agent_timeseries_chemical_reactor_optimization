@@ -5,6 +5,51 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 
 
+# Time-based features
+def add_time_features(df):
+    # Convert Bezeichnung to datetime if not already
+    df['datetime'] = pd.to_datetime(df['Bezeichnung'], format='%d/%m/%Y %H:%M:%S')
+    
+    # Extract time components
+    df['hour'] = df['datetime'].dt.hour
+    df['day'] = df['datetime'].dt.day
+    df['month'] = df['datetime'].dt.month
+    df['day_of_week'] = df['datetime'].dt.dayofweek
+    df['is_weekend'] = df['datetime'].dt.dayofweek.isin([5, 6]).astype(int)
+    
+    return df
+
+def add_rolling_features(df, target_col, windows=[3, 6, 12, 24]):
+    for window in windows:
+        # Calculate rolling features
+        df[f'{target_col}_rolling_mean_{window}h'] = df[target_col].rolling(window=window).mean()
+        df[f'{target_col}_rolling_std_{window}h'] = df[target_col].rolling(window=window).std()
+        df[f'{target_col}_rolling_min_{window}h'] = df[target_col].rolling(window=window).min()
+        df[f'{target_col}_rolling_max_{window}h'] = df[target_col].rolling(window=window).max()
+        
+        # Fill NaN values
+        # For mean and std, use the actual value
+        df[f'{target_col}_rolling_mean_{window}h'] = df[f'{target_col}_rolling_mean_{window}h'].fillna(df[target_col])
+        df[f'{target_col}_rolling_std_{window}h'] = df[f'{target_col}_rolling_std_{window}h'].fillna(0)
+        
+        # For min/max, use the actual value
+        df[f'{target_col}_rolling_min_{window}h'] = df[f'{target_col}_rolling_min_{window}h'].fillna(df[target_col])
+        df[f'{target_col}_rolling_max_{window}h'] = df[f'{target_col}_rolling_max_{window}h'].fillna(df[target_col])
+    
+    return df
+
+def add_lag_features(df, target_col, lags=[1, 2, 3, 6, 12, 24]):
+    for lag in lags:
+        # Create lag feature
+        df[f'{target_col}_lag_{lag}h'] = df[target_col].shift(lag)
+        
+        # Fill NaN values with the mean of the target column
+        df[f'{target_col}_lag_{lag}h'] = df[f'{target_col}_lag_{lag}h'].fillna(df[target_col].mean())
+        
+        # Alternative: forward fill
+        # df[f'{target_col}_lag_{lag}h'] = df[f'{target_col}_lag_{lag}h'].ffill()
+    
+    return df
 
 def load_and_preprocess_data(data_path="data/Daten_juna.csv"):
     df = pd.read_csv(data_path,sep=",")
@@ -46,9 +91,13 @@ def load_and_preprocess_data(data_path="data/Daten_juna.csv"):
     for col in df.columns:
         df_cleaned[col] = safe_numeric_convert(df_cleaned[col])
         #print(f"{col:<20}{df_cleaned[col].dtype}")
+    df_cleaned = add_time_features(df_cleaned)
+    df_cleaned = add_rolling_features(df_cleaned, target_col='2|CB')
+    df_cleaned = add_lag_features(df_cleaned, target_col='2|CB')
 
 
     return df_cleaned
+
 
 def process_data_for_training(df_cleaned, reactor=2, seq_length=5, target_variable="2|CB", remove_variables=["R2 CO2", "R2 SO2"]):
     

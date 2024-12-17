@@ -164,4 +164,5 @@ cython_debug/
 # My ignores
 data/
 mlruns/
+src/models/
 models/

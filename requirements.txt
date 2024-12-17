@@ -5,3 +5,11 @@ seaborn
 scipy
 scikit-learn
 tensorflow
+torch
+numpy
+kafka-python
+prometheus_client
+grafana_api
+streamlit
+gymnasium
+stable-baselines3[extra]
