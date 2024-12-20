@@ -16,7 +16,7 @@ class ChemicalReactorEnv(gym.Env):
 
         # Try to load model, use dummy predictor if not available
         model_target = f"{reactor_number}|CB" if optimization_target == "CB" else f"R{reactor_number} {optimization_target}"
-        model_path = f'src/models/lstm_model_reactor_{reactor_number}_target_{model_target}.keras'
+        model_path = f'models/lstm_model_reactor_{reactor_number}_target_{model_target}.keras'
         
         try:
             if os.path.exists(model_path):
@@ -103,7 +103,31 @@ class ChemicalReactorEnv(gym.Env):
         
         return self.state, reward, done, False, {'output': output}
 
+    def _prepare_model_input(self, state):
+        """Prepare state for model input"""
+        if self.using_dummy_model:
+            return np.array([state])
+        
+        try:
+            # Convert state to dictionary format
+            state_dict = {name: value for name, value in zip(self.parameter_names, state)}
+            
+            # Create sequence of 5 timesteps (as per your training setup)
+            sequence = np.array([list(state_dict.values())] * 5)  # Repeat current state 5 times
+            
+            # Reshape for LSTM input: [batch_size, time_steps, features]
+            model_input = np.expand_dims(sequence, axis=0)  # Shape: (1, 5, n_features)
+            
+            logging.debug(f"Model input shape: {model_input.shape}")
+            return model_input
+            
+        except Exception as e:
+            logging.error(f"Error preparing model input: {e}")
+            self.using_dummy_model = True
+            return self._prepare_model_input(state)  # Recursive call will use dummy logic
+
     def _predict_output(self, state):
+        """Predict output based on state"""
         if self.using_dummy_model:
             # Dummy prediction logic
             if self.optimization_target == "CB":
@@ -113,17 +137,24 @@ class ChemicalReactorEnv(gym.Env):
                 # For emissions, return a value inversely proportional to parameters
                 return 100 - np.mean(state)
         else:
-            # Use actual model for prediction
-            model_input = self._prepare_model_input(state)
-            prediction = self.prediction_model.predict(model_input, verbose=0)
-            return float(prediction[0][0])
-
-    def _prepare_model_input(self, state):
-        # Convert state to dictionary format
-        state_dict = {name: value for name, value in zip(self.parameter_names, state)}
-        # This needs to be adapted based on your model's input requirements
-        # Assuming your model's input requires a list of values, we convert the dictionary values to a list
-        return list(state_dict.values())
+            try:
+                # Use actual model for prediction
+                model_input = self._prepare_model_input(state)
+                
+                # Add input shape validation
+                expected_shape = (1, 5, len(self.parameter_names))  # batch_size, time_steps, features
+                if model_input.shape != expected_shape:
+                    raise ValueError(
+                        f"Invalid input shape. Expected {expected_shape}, got {model_input.shape}"
+                    )
+                
+                prediction = self.prediction_model.predict(model_input, verbose=0)
+                return float(prediction[0][0])
+                
+            except Exception as e:
+                logging.warning(f"Error in prediction: {e}. Falling back to dummy predictor.")
+                self.using_dummy_model = True
+                return self._predict_output(state)  # Recursive call will use dummy logic
 
     def _calculate_penalties(self, action):
         penalty = 0

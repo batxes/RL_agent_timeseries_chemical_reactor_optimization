@@ -92,7 +92,7 @@ chemical-optimization/
 ## Model Requirements
 
 The application can work in two modes:
-1. **With trained models**: Place your trained LSTM models in `src/models/` with the naming convention:
+1. **With trained models**: Place your trained LSTM models in `models/` with the naming convention:
    - `lstm_model_reactor_X_target_X|CB.keras`
    - `lstm_model_reactor_X_target_RX CO2.keras`
    - `lstm_model_reactor_X_target_RX SO2.keras`

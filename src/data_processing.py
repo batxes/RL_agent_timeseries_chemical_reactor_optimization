@@ -63,7 +63,6 @@ def load_and_preprocess_data(data_path="data/Daten_juna.csv"):
     list_of_failed_measurements = []
 
     def check_non_numeric(series):
-        print (series.name)
         non_numeric = series[pd.to_numeric(series, errors='coerce').isna() & series.notna()]
         return (len(non_numeric),set(non_numeric)),list(set(non_numeric))
 
@@ -91,9 +90,6 @@ def load_and_preprocess_data(data_path="data/Daten_juna.csv"):
     for col in df.columns:
         df_cleaned[col] = safe_numeric_convert(df_cleaned[col])
         #print(f"{col:<20}{df_cleaned[col].dtype}")
-    df_cleaned = add_time_features(df_cleaned)
-    df_cleaned = add_rolling_features(df_cleaned, target_col='2|CB')
-    df_cleaned = add_lag_features(df_cleaned, target_col='2|CB')
 
 
     return df_cleaned
@@ -103,21 +99,20 @@ def process_data_for_training(df_cleaned, reactor=2, seq_length=5, target_variab
     
     features = [col for col in df_cleaned.columns 
                 if ((col.startswith(str(reactor)) or col.startswith("R"+str(reactor))) 
-                    and not col.endswith("CCT") 
-                    and not col.endswith("CTD") 
-                    and not col.endswith("FCC") 
-                    and not col.endswith("SCT") 
+                    #and not col.endswith("CCT") 
+                    #and not col.endswith("CTD") 
+                    #and not col.endswith("FCC") 
+                    #and not col.endswith("SCT") 
                     #and not col.endswith("CO2") 
                     #and not col.endswith("SO2") 
                     and not col.startswith("KD")
                     and not col.startswith("KE")
                     and not col.startswith("LT7")
-                    #and not col.endswith("Dampfmenge") 
+                    and not col.endswith("Dampfmenge") 
                     and not col.endswith("Sorte"))]
     if len(remove_variables) > 0:
         for col in remove_variables:
             features.remove(col)
-    print (features)
 
     # Data preprocessing done. Now we will process for feeding the training.
     data = df_cleaned[features].values

@@ -4,6 +4,26 @@ import numpy as np
 from src.reactor_env import ChemicalReactorEnv
 import logging
 
+from stable_baselines3.common.callbacks import BaseCallback
+
+class StableBaselines3Callback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.history = {
+            'rollout/ep_rew_mean': [],
+            'train/policy_loss': [],
+            'train/value_loss': [],
+        }
+    
+    def _on_step(self):
+        self.history['rollout/ep_rew_mean'].append(
+            self.logger.name_to_value['rollout/ep_rew_mean'])
+        self.history['train/policy_loss'].append(
+            self.logger.name_to_value['train/policy_loss'])
+        self.history['train/value_loss'].append(
+            self.logger.name_to_value['train/value_loss'])
+        return True
+
 class ReactorOptimizationAgent:
     def __init__(self, reactor_number, optimization_target="CB"):
         """
@@ -39,7 +59,10 @@ class ReactorOptimizationAgent:
             raise
 
     def train(self, total_timesteps=50000):
-        self.model.learn(total_timesteps=total_timesteps)
+        """Train the agent and return training history"""
+        callback = StableBaselines3Callback()  # Custom callback to collect metrics
+        self.model.learn(total_timesteps=total_timesteps, callback=callback)
+        return callback.history
         
     def save(self, path):
         self.model.save(path)

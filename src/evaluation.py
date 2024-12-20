@@ -95,3 +95,5 @@ def predict_and_evaluate_model(model, X_test, y_test, target_variable, scaler, f
     plt.savefig("figures/evaluation_model_reactor_{}_target_{}.pdf".format(reactor, target_variable), dpi=300)
 
     #plt.show()
+
+    return predictions, y_test_actual
