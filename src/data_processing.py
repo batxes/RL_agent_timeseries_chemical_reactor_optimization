@@ -109,7 +109,16 @@ def process_data_for_training(df_cleaned, reactor=2, seq_length=5, target_variab
                     and not col.startswith("KE")
                     and not col.startswith("LT7")
                     and not col.endswith("Dampfmenge") 
-                    and not col.endswith("Sorte"))]
+                    and not col.endswith("Sorte")
+                    )
+                    or col == "hour"
+                    or col == "day"
+                    or col == "month"
+                    or col == "day_of_week"
+                    or col == "is_weekend"
+                    ]
+    print (remove_variables)
+    print (features)
     if len(remove_variables) > 0:
         for col in remove_variables:
             features.remove(col)

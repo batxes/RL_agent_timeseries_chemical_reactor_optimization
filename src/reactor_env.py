@@ -4,34 +4,48 @@ import numpy as np
 from tensorflow.keras.models import load_model
 import logging
 import os
+from datetime import datetime
 
 class ChemicalReactorEnv(gym.Env):
-    def __init__(self, reactor_number, optimization_target="CB"):
+    def __init__(self, reactor_number, weights=None, active_parameters=None):
         """
-        optimization_target: "CB" (production), "CO2" (emissions), or "SO2" (emissions)
+        Initialize environment with multiple LSTM models for different objectives.
+        
+        Args:
+            reactor_number: Reactor number (e.g., 2)
+            weights: Dictionary with weights for each objective
+                    Default: CB=0.5 (production), CO2=0.25, SO2=0.25 (emissions)
         """
         super().__init__()
         self.reactor_number = reactor_number
-        self.optimization_target = optimization_target
 
-        # Try to load model, use dummy predictor if not available
-        model_target = f"{reactor_number}|CB" if optimization_target == "CB" else f"R{reactor_number} {optimization_target}"
-        model_path = f'models/lstm_model_reactor_{reactor_number}_target_{model_target}.keras'
-        
+        # Set default weights if none provided
+        self.weights = weights if weights is not None else {
+            'CB': 0.5,    # Higher weight for production
+            'CO2': 0.25,  # Lower weights for emissions
+            'SO2': 0.25
+        }
+
+        # Load models first to get input shape
         try:
-            if os.path.exists(model_path):
-                self.prediction_model = load_model(model_path)
-                self.using_dummy_model = False
-                logging.info(f"Loaded model from {model_path}")
-            else:
-                logging.warning(f"Model not found at {model_path}. Using dummy predictor.")
-                self.using_dummy_model = True
+            self.cb_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras')
+            self.co2_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras')
+            self.so2_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras')
+            
+            # Get expected input shape from model
+            self.expected_timesteps = self.cb_model.input_shape[1]
+            self.expected_features = self.cb_model.input_shape[2]
+            logging.info(f"Model expects input shape: (batch, {self.expected_timesteps}, {self.expected_features})")
+            
+            self.using_dummy_model = False
         except Exception as e:
-            logging.warning(f"Error loading model: {e}. Using dummy predictor.")
+            logging.warning(f"Error loading models: {e}. Using dummy predictor.")
             self.using_dummy_model = True
-        
+            self.expected_timesteps = 5
+            self.expected_features = 47
+
         # Define controllable parameters and their ranges
-        self.parameter_config = {
+        self.full_parameter_config = {
             f'{reactor_number}|Erdgas': (0, 100),
             f'{reactor_number}|Konst.Stufe': (0, 100),
             f'{reactor_number}|Perlwasser': (0, 100),
@@ -53,8 +67,46 @@ class ChemicalReactorEnv(gym.Env):
             f'{reactor_number}|O': (0, 100),
             f'{reactor_number}|S': (0, 100)
         }
+
+                # Filter parameters based on selection
+        if active_parameters:
+            self.parameter_config = {
+                param: self.full_parameter_config[param]
+                for param in active_parameters
+                if param in self.full_parameter_config
+            }
+        else:
+            self.parameter_config = self.full_parameter_config
+            
+        self.parameter_names = list(self.parameter_config.keys())
+        # Update parameter_indices to only track active parameters
+        self.parameter_indices = {
+            param: i for i, param in enumerate(self.parameter_names)
+        }
+
+        # Store full parameter list for state management
+        self.full_parameter_list = list(self.full_parameter_config.keys())
+        self.full_state = np.array([
+            (self.full_parameter_config[param][0] + self.full_parameter_config[param][1]) / 2
+            for param in self.full_parameter_list
+        ])
         
-        # Define action and observation spaces
+        # Define action and observation spaces only for selected parameters
+        self.action_space = spaces.Box(
+            low=np.array([config[0] for config in self.parameter_config.values()]),
+            high=np.array([config[1] for config in self.parameter_config.values()]),
+            dtype=np.float32
+        )
+        
+        self.observation_space = spaces.Box(
+            low=self.action_space.low,
+            high=self.action_space.high,
+            dtype=np.float32
+        )
+
+        
+
+        # Define action and observation spaces (keep your existing spaces)
         self.parameter_names = list(self.parameter_config.keys())
         self.action_space = spaces.Box(
             low=np.array([config[0] for config in self.parameter_config.values()]),
@@ -71,90 +123,203 @@ class ChemicalReactorEnv(gym.Env):
 
     def reset(self, seed=None):
         super().reset(seed=seed)
-        # Initialize state with middle values
+        # Initialize full state with middle values
+        self.full_state = np.array([
+            (self.full_parameter_config[param][0] + self.full_parameter_config[param][1]) / 2
+            for param in self.full_parameter_list
+        ])
+        
+        # Return only active parameters
         self.state = np.array([
-            (high + low) / 2 for low, high in self.parameter_config.values()
+            self.full_state[self.full_parameter_list.index(param)]
+            for param in self.parameter_names
         ])
         return self.state, {}
 
+    def _calculate_reward(self, predictions):
+        """Calculate weighted reward from all objectives"""
+        if not hasattr(self, 'last_predictions'):
+            self.last_predictions = predictions
+            return 0
+        
+        # Calculate improvements (or reductions) for each objective
+        improvements = {
+            'CB': (predictions['CB'] - self.last_predictions['CB']) / max(1e-6, self.last_predictions['CB']),
+            'CO2': -(predictions['CO2'] - self.last_predictions['CO2']) / max(1e-6, self.last_predictions['CO2']),
+            'SO2': -(predictions['SO2'] - self.last_predictions['SO2']) / max(1e-6, self.last_predictions['SO2'])
+        }
+        
+        # Store current predictions for next step
+        self.last_predictions = predictions
+        
+        # Calculate weighted sum of improvements
+        reward = sum(self.weights[obj] * imp for obj, imp in improvements.items())
+        
+        return reward
+    
     def step(self, action):
-        # Apply action (new parameter values)
-        self.state = np.clip(action, self.action_space.low, self.action_space.high)
+        """
+        Take a step in the environment using only active parameters.
+        """
+        # Clip action to valid ranges
+        clipped_action = np.clip(action, self.action_space.low, self.action_space.high)
         
-        # Predict output using LSTM model
-        output = self._predict_output(self.state)
+        # Update full state with new actions for active parameters
+        for i, param in enumerate(self.parameter_names):
+            full_idx = self.full_parameter_list.index(param)
+            self.full_state[full_idx] = clipped_action[i]
         
-        # Calculate reward based on optimization target
-        if self.optimization_target == "CB":
-            # For production, we want to maximize
-            reward = output - self.last_output if hasattr(self, 'last_output') else 0
-        else:
-            # For emissions (CO2, SO2), we want to minimize
-            reward = self.last_output - output if hasattr(self, 'last_output') else 0
+        # Update current state with active parameters
+        self.state = np.array([
+            self.full_state[self.full_parameter_list.index(param)]
+            for param in self.parameter_names
+        ])
         
-        self.last_output = output
+        # Get predictions using full state
+        predictions = self._predict_outputs(self.full_state)
         
-        # Add penalties
-        penalty = self._calculate_penalties(action)
+        # Calculate reward
+        reward = self._calculate_reward(predictions)
+        
+        # Add penalties for large parameter changes
+        penalty = self._calculate_penalties(clipped_action)
         reward -= penalty
         
         # Episode never done (continuous optimization)
         done = False
         
-        return self.state, reward, done, False, {'output': output}
+        # Include predictions in info
+        info = {
+            'CB_pred': predictions['CB'],
+            'CO2_pred': predictions['CO2'],
+            'SO2_pred': predictions['SO2'],
+            'reward': reward,
+            'penalty': penalty
+        }
+        
+        return self.state, reward, done, False, info
 
     def _prepare_model_input(self, state):
-        """Prepare state for model input"""
+        """
+        Prepare the input for LSTM models.
+        Expected shape: (batch_size, timesteps, features)
+        """
+        try:
+            # Define expected dimensions
+            n_timesteps = 5
+            n_features = 47  # Total number of features expected by the model
+            
+            # Create a full feature vector with zeros
+            full_features = np.zeros(n_features)
+            
+            # Map the active parameters to their correct positions in the full feature vector
+            for param, value in zip(self.parameter_names, state):
+                if param in self.full_parameter_config:
+                    # Get the index in the full feature set
+                    # You might need to adjust this mapping based on your actual feature order
+                    feature_idx = list(self.full_parameter_config.keys()).index(param)
+                    full_features[feature_idx] = value
+            
+            # Repeat the features for the required timesteps
+            # Shape: (1, timesteps, features)
+            model_input = np.repeat(full_features[np.newaxis, np.newaxis, :], 
+                                n_timesteps, 
+                                axis=1)
+            
+            logging.debug(f"Prepared model input shape: {model_input.shape}")
+            return model_input
+            
+        except Exception as e:
+            logging.error(f"Error preparing model input: {e}")
+            raise
+
+    def _prepare_model_input_old(self, state):
+        """
+        Prepare the input for LSTM models.
+        Expected shape: (batch_size, timesteps, features)
+        """        
         if self.using_dummy_model:
             return np.array([state])
         
         try:
-            # Convert state to dictionary format
-            state_dict = {name: value for name, value in zip(self.parameter_names, state)}
+            # Create a dictionary with current parameter values
+            current_values = {name: value for name, value in zip(self.parameter_names, state)}
             
-            # Create sequence of 5 timesteps (as per your training setup)
-            sequence = np.array([list(state_dict.values())] * 5)  # Repeat current state 5 times
+            # Get current time features
+            now = datetime.now()
+            current_hour = now.hour
+            current_day = now.day
+            current_month = now.month
+            current_weekday = now.weekday()
+            is_weekend = 1 if current_weekday >= 5 else 0
             
-            # Reshape for LSTM input: [batch_size, time_steps, features]
+            # Create full feature vector including rolling and lag features
+            # For now, we'll use dummy values for historical features
+            feature_vector = []
+            
+            # Add controllable parameters first
+            for param in self.parameter_names:
+                feature_vector.append(current_values[param])
+            
+            # Add rolling features (using dummy values for now)
+            target = f"{self.reactor_number}|CB"
+            for window in [3, 6, 12, 24]:
+                feature_vector.extend([50.0] * 4)  # mean, std, min, max
+            
+            # Add lag features (using dummy values for now)
+            for lag in [1, 2, 3, 6, 12, 24]:
+                feature_vector.append(50.0)
+            
+            # Add time features
+            feature_vector.extend([
+                current_hour,
+                current_day,
+                current_month,
+                current_weekday,
+                is_weekend
+            ])
+                  # Convert to numpy array and reshape for LSTM
+            feature_vector = np.array(feature_vector)
+            
+            # Create sequence of 5 timesteps
+            sequence = np.tile(feature_vector, (5, 1))  # Shape: (5, n_features)
+            
+            # Add batch dimension
             model_input = np.expand_dims(sequence, axis=0)  # Shape: (1, 5, n_features)
             
-            logging.debug(f"Model input shape: {model_input.shape}")
+            # Validate shape
+            expected_shape = (1, 5, len(feature_vector))
+            if model_input.shape != expected_shape:
+                raise ValueError(f"Invalid input shape. Expected {expected_shape}, got {model_input.shape}")
+            
+            logging.debug(f"Prepared input shape: {model_input.shape}")
             return model_input
             
         except Exception as e:
             logging.error(f"Error preparing model input: {e}")
             self.using_dummy_model = True
-            return self._prepare_model_input(state)  # Recursive call will use dummy logic
+            return self._prepare_model_input(state)
 
-    def _predict_output(self, state):
-        """Predict output based on state"""
+    def _predict_outputs(self, state):
+        """Predict all objectives using respective models"""
         if self.using_dummy_model:
-            # Dummy prediction logic
-            if self.optimization_target == "CB":
-                # For production, return a value based on average of parameters
-                return np.mean(state) * 1.5
-            else:
-                # For emissions, return a value inversely proportional to parameters
-                return 100 - np.mean(state)
-        else:
-            try:
-                # Use actual model for prediction
-                model_input = self._prepare_model_input(state)
-                
-                # Add input shape validation
-                expected_shape = (1, 5, len(self.parameter_names))  # batch_size, time_steps, features
-                if model_input.shape != expected_shape:
-                    raise ValueError(
-                        f"Invalid input shape. Expected {expected_shape}, got {model_input.shape}"
-                    )
-                
-                prediction = self.prediction_model.predict(model_input, verbose=0)
-                return float(prediction[0][0])
-                
-            except Exception as e:
-                logging.warning(f"Error in prediction: {e}. Falling back to dummy predictor.")
-                self.using_dummy_model = True
-                return self._predict_output(state)  # Recursive call will use dummy logic
+            return {
+                'CB': np.mean(state) * 1.5,  # Dummy production
+                'CO2': 100 - np.mean(state),  # Dummy CO2 emissions
+                'SO2': 50 - np.mean(state)    # Dummy SO2 emissions
+            }
+        
+        try:
+            model_input = self._prepare_model_input(state)
+            return {
+                'CB': float(self.cb_model.predict(model_input, verbose=0)[0][0]),
+                'CO2': float(self.co2_model.predict(model_input, verbose=0)[0][0]),
+                'SO2': float(self.so2_model.predict(model_input, verbose=0)[0][0])
+            }
+        except Exception as e:
+            logging.warning(f"Error in prediction: {e}. Using dummy values.")
+            self.using_dummy_model = True
+            return self._predict_outputs(state)
 
     def _calculate_penalties(self, action):
         penalty = 0

@@ -75,7 +75,8 @@ def main():
         save_test_predictions(y_test_actual, predictions, reactor, target_name)
 
     # model all reactors for production, CO2 and SO2
-    for r in [2, 3, 4, 5, 6, 7]:
+    #for r in [2, 3, 4, 5, 6, 7]:
+    for r in [2]:
         for t in ["{}|CB".format(r),"R{} CO2".format(r),"R{} SO2".format(r)]:
             load_train_predict_evaluate(initial_cleaned_data, r,t)     
 
