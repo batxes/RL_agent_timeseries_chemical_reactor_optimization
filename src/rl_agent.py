@@ -85,54 +85,74 @@ class ReactorOptimizationAgent:
             active_parameters=active_parameters
         )
         
+        # Calculate network size based on number of parameters
+        n_parameters = len(active_parameters) if active_parameters else len(self.raw_env.parameter_names)
+        
+        # Scale network architecture based on parameter count
+        if n_parameters <= 2:
+            net_arch = dict(pi=[16, 8], vf=[16, 8])  # Tiny network for few parameters
+            batch_size = 32
+            learning_rate = 3e-4
+            n_steps = 512  # Smaller batch of experiences
+            n_epochs = 5   # Fewer training epochs
+        elif n_parameters <= 5:
+            net_arch = dict(pi=[32, 16], vf=[32, 16])  # Small network
+            batch_size = 64
+            learning_rate = 1e-4
+            n_steps = 1024
+            n_epochs = 8
+        elif n_parameters <= 10:
+            net_arch = dict(pi=[64, 32], vf=[64, 32])  # Medium network
+            batch_size = 128
+            learning_rate = 5e-5
+            n_steps = 2048
+            n_epochs = 10
+        else:
+            net_arch = dict(pi=[128, 64], vf=[128, 64])  # Large network
+            batch_size = 256
+            learning_rate = 1e-5
+            n_steps = 4096
+            n_epochs = 12
+        
         # Initialize training metrics
         self.training_metrics = {
             'steps_per_second': [],
             'mean_reward': [],
+            'timesteps': [],
             'parameter_updates': {},
-            'timesteps': []
+            'network_size': sum([np.prod(layer) for layer in net_arch['pi'] + net_arch['vf']])
         }
-        
-        # Calculate complexity metrics
-        self.complexity_metrics = {
-            'action_space_size': len(active_parameters) if active_parameters else len(self.raw_env.parameter_names),
-            'total_combinations': np.prod([
-                self.raw_env.parameter_config[param][1] - self.raw_env.parameter_config[param][0]
-                for param in self.raw_env.parameter_names
-            ])
-        }
-        
-        # Initialize parameter tracking
-        for param in self.raw_env.parameter_names:
-            self.training_metrics['parameter_updates'][param] = []
         
         # Wrap environment for stable-baselines
         self.env = DummyVecEnv([lambda: self.raw_env])
         
-        # Create PPO model with smaller network for fewer parameters
-        policy_kwargs = dict(
-            net_arch=dict(
-                pi=[64, 32],  # Smaller policy network
-                vf=[64, 32]   # Smaller value network
-            )
-        )
-        
-        # Adjust batch size based on number of parameters
-        batch_size = min(64, max(32, self.complexity_metrics['action_space_size'] * 4))
-        
+        # Create PPO model with scaled architecture
         self.model = PPO(
             "MlpPolicy",
             self.env,
-            learning_rate=1e-4,
-            n_steps=2048,
+            learning_rate=learning_rate,
+            n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=10,
+            n_epochs=n_epochs,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            policy_kwargs=policy_kwargs,
+            policy_kwargs=dict(
+                net_arch=net_arch,
+                log_std_init=-2.0 if n_parameters <= 2 else -1.0  # More focused exploration for fewer parameters
+            ),
             verbose=1
         )
+        
+        # Store configuration for reference
+        self.config = {
+            'n_parameters': n_parameters,
+            'network_size': self.training_metrics['network_size'],
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'n_steps': n_steps,
+            'n_epochs': n_epochs
+        }
         
         # Initialize training time
         self.training_time = 0
@@ -192,30 +212,17 @@ class ReactorOptimizationAgent:
             def __init__(self, agent, verbose=0):
                 super().__init__(verbose)
                 self.agent = agent
-                self.last_update_time = time.time()
             
             def _on_step(self) -> bool:
-                current_time = time.time()
-                
-                # Update metrics every 1000 steps
-                if self.n_calls % 1000 == 0:
-                    # Calculate steps per second
-                    steps_per_second = 1000 / (current_time - self.last_update_time)
-                    self.agent.training_metrics['steps_per_second'].append(steps_per_second)
-                    self.agent.training_metrics['timesteps'].append(self.n_calls)
-                    
-                    # Track parameter changes if possible
-                    if hasattr(self.model, 'rollout_buffer') and self.model.rollout_buffer is not None:
-                        if self.model.rollout_buffer.observations.size > 0:
-                            for i, param in enumerate(self.agent.raw_env.parameter_names):
-                                values = self.model.rollout_buffer.observations[:, i]
-                                if param not in self.agent.training_metrics['parameter_updates']:
-                                    self.agent.training_metrics['parameter_updates'][param] = []
-                                self.agent.training_metrics['parameter_updates'][param].append(
-                                    np.std(values)
-                                )
-                    
-                    self.last_update_time = current_time
+                # Update metrics every 100 steps
+                if self.n_calls % 100 == 0:
+                    # Get training info
+                    if hasattr(self.model, 'logger') and self.model.logger is not None:
+                        # Store detailed metrics
+                        for key, value in self.model.logger.name_to_value.items():
+                            if key not in self.agent.training_metrics:
+                                self.agent.training_metrics[key] = []
+                            self.agent.training_metrics[key].append(value)
                 
                 return True
         
@@ -280,3 +287,12 @@ class ReactorOptimizationAgent:
             suggestions[param] = float(action[i])
         
         return suggestions
+
+    def set_parameters(self, learning_rate=None, batch_size=None, n_epochs=None):
+        """Update model parameters"""
+        if learning_rate is not None:
+            self.model.learning_rate = learning_rate
+        if batch_size is not None:
+            self.model.batch_size = batch_size
+        if n_epochs is not None:
+            self.model.n_epochs = n_epochs

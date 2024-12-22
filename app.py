@@ -8,80 +8,211 @@ import logging
 from stable_baselines3.common.callbacks import BaseCallback
 import os
 from matplotlib.gridspec import GridSpec
+import time
+from datetime import timedelta
+
+def create_training_controls(agent, active_parameters):
+    """Create training controls in the sidebar"""
+    with st.sidebar:
+        st.subheader("Training Parameters")
+        
+        # Model information
+        n_params = len(active_parameters) if active_parameters else "all"
+        st.info(f"Model Configuration:\n"
+                f"- Parameters to optimize: {n_params}\n"
+                f"- Network complexity: {agent.training_metrics['network_size']:,} parameters\n"
+                f"- Batch size: {agent.model.batch_size}")
+        
+        # Training parameters
+        params = {}
+        params['total_steps'] = st.number_input("Training Steps", min_value=1000, value=10000, step=1000)
+        params['learning_rate'] = st.number_input("Learning Rate", min_value=1e-6, max_value=1e-2, 
+                                                value=1e-4, format="%.0e")
+        params['batch_size'] = st.number_input("Batch Size", min_value=32, max_value=512, value=64, step=32)
+        params['n_epochs'] = st.number_input("Number of Epochs", min_value=1, max_value=20, value=10)
+        
+        # Training button
+        train_button = st.button("Train Agent")
+        
+        # Speed metrics containers
+        speed_metrics = {
+            'steps_per_second': st.empty(),
+            'time_per_step': st.empty(),
+            'estimated_time': st.empty(),
+            'active_params': st.empty()
+        }
+        
+        # Progress information
+        progress_container = st.empty()
+        progress_bar = st.progress(0.0)
+        
+        return params, train_button, progress_container, progress_bar, speed_metrics
+
+def create_metric_charts():
+    """Create placeholder charts in the sidebar for real-time updates"""
+    with st.sidebar:
+        st.subheader("Training Metrics")
+        
+        # Create metrics containers
+        metrics = {}
+        
+        # Training Progress
+        metrics['progress_text'] = st.empty()  # For showing progress percentage
+        
+        # Charts
+        metrics['reward_chart'] = st.empty()  # For reward plot
+        st.markdown("**Reward** (Green: Good, Red: Poor)")
+        
+        metrics['loss_chart'] = st.empty()  # For loss plot
+        st.markdown("**Policy Loss**")
+        
+        metrics['value_chart'] = st.empty()  # For value loss plot
+        st.markdown("**Value Loss**")
+        
+        metrics['std_chart'] = st.empty()  # For std plot
+        st.markdown("**Action Standard Deviation**")
+        
+        return metrics
 
 class TrainingCallback(BaseCallback):
-    """Custom callback for displaying training progress"""
-    
-    def __init__(self, total_steps, verbose=0):
+    def __init__(self, total_steps, metric_charts, progress_container, progress_bar, speed_metrics, verbose=0):
         super().__init__(verbose)
         self.total_steps = total_steps
-        self.progress_bar = None
+        self.metric_charts = metric_charts
+        self.progress_container = progress_container
+        self.progress_bar = progress_bar
+        self.speed_metrics = speed_metrics
+        self.reward_threshold = {'good': 0.7, 'poor': 0.3}
+        
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.last_steps = 0
+        
+        # Initialize metric data
+        self.metrics_data = {
+            'rewards': [],
+            'policy_losses': [],
+            'value_losses': [],
+            'stds': []
+        }
     
     def _on_step(self) -> bool:
-        """Update progress bar"""
-        # Calculate progress
-        progress = self.num_timesteps / self.total_steps
+        """Update progress and metrics in real-time"""
+        current_time = time.time()
+        elapsed = current_time - self.last_update_time
         
-        # Update progress bar every 1000 steps
-        if self.num_timesteps % 1000 == 0:
-            if self.progress_bar is None:
-                self.progress_bar = st.progress(0.0)
-            self.progress_bar.progress(progress)
+        # Update metrics every 100 steps for smoother display
+        if self.num_timesteps % 100 == 0:
+            # Calculate speed metrics
+            steps_since_last = self.num_timesteps - self.last_steps
+            if elapsed > 0:
+                steps_per_second = steps_since_last / elapsed
+                ms_per_step = (elapsed * 1000) / steps_since_last
+                
+                # Update speed displays
+                self.speed_metrics['steps_per_second'].markdown(
+                    f"**Speed:** {steps_per_second:.1f} steps/second"
+                )
+                self.speed_metrics['time_per_step'].markdown(
+                    f"**Time per step:** {ms_per_step:.1f} ms"
+                )
+                
+                # Calculate and show estimated time remaining
+                remaining_steps = self.total_steps - self.num_timesteps
+                estimated_seconds = remaining_steps / steps_per_second
+                estimated_time = str(timedelta(seconds=int(estimated_seconds)))
+                self.speed_metrics['estimated_time'].markdown(
+                    f"**Estimated time remaining:** {estimated_time}"
+                )
+            
+            # Show active parameters count
+            n_params = len(self.training_env.get_attr('parameter_names')[0])
+            self.speed_metrics['active_params'].markdown(
+                f"**Active parameters:** {n_params}"
+            )
+            
+            # Reset counters
+            self.last_update_time = current_time
+            self.last_steps = self.num_timesteps
+        
+        # Update progress
+        progress = self.num_timesteps / self.total_steps
+        self.progress_bar.progress(progress)
+        self.progress_container.text(f"Training Progress: {progress:.1%}")
+        
+        # Update metrics every step
+        if hasattr(self.model, 'logger') and self.model.logger is not None:
+            metrics_dict = self.model.logger.name_to_value
+            
+            # Update reward data
+            if 'rollout/ep_rew_mean' in metrics_dict:
+                self.metrics_data['rewards'].append(metrics_dict['rollout/ep_rew_mean'])
+                df = pd.DataFrame({'reward': self.metrics_data['rewards']})
+                self.metric_charts['reward_chart'].line_chart(df)
+            
+            # Update loss data
+            if 'train/policy_loss' in metrics_dict:
+                self.metrics_data['policy_losses'].append(metrics_dict['train/policy_loss'])
+                df = pd.DataFrame({'policy_loss': self.metrics_data['policy_losses']})
+                self.metric_charts['loss_chart'].line_chart(df)
+            
+            # Update value loss data
+            if 'train/value_loss' in metrics_dict:
+                self.metrics_data['value_losses'].append(metrics_dict['train/value_loss'])
+                df = pd.DataFrame({'value_loss': self.metrics_data['value_losses']})
+                self.metric_charts['value_chart'].line_chart(df)
+            
+            # Update std data
+            if 'train/std' in metrics_dict:
+                self.metrics_data['stds'].append(metrics_dict['train/std'])
+                df = pd.DataFrame({'std': self.metrics_data['stds']})
+                self.metric_charts['std_chart'].line_chart(df)
         
         return True
 
-    def on_training_end(self) -> None:
-        """Clean up progress bar"""
-        if self.progress_bar is not None:
-            self.progress_bar.progress(1.0)
-
-def plot_training_complexity(agent):
-    """Plot training complexity metrics using Matplotlib"""
-    fig = plt.figure(figsize=(12, 10))
+def plot_training_metrics(agent):
+    """Plot training metrics using matplotlib"""
+    if not agent.training_metrics['timesteps']:
+        return None
+        
+    fig = plt.figure(figsize=(15, 10))
     gs = GridSpec(2, 2, figure=fig)
     
-    # Training speed
+    # Plot training speed
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(agent.training_metrics['timesteps'], 
              agent.training_metrics['steps_per_second'])
     ax1.set_title('Training Speed')
-    ax1.set_ylabel('Steps/Second')
     ax1.set_xlabel('Timesteps')
+    ax1.set_ylabel('Steps/Second')
     
-    # Parameter exploration
+    # Plot mean reward
     ax2 = fig.add_subplot(gs[0, 1])
+    if agent.training_metrics['mean_reward']:
+        ax2.plot(agent.training_metrics['timesteps'][:len(agent.training_metrics['mean_reward'])], 
+                 agent.training_metrics['mean_reward'])
+        ax2.set_title('Mean Reward')
+        ax2.set_xlabel('Timesteps')
+        ax2.set_ylabel('Reward')
+    
+    # Plot parameter evolution
+    ax3 = fig.add_subplot(gs[1, 0])
     for param, values in agent.training_metrics['parameter_updates'].items():
         if values:  # Only plot if we have data
-            ax2.plot(agent.training_metrics['timesteps'][:len(values)], 
+            ax3.plot(agent.training_metrics['timesteps'][:len(values)], 
                     values, label=param.split('|')[-1])
-    ax2.set_title('Parameter Exploration')
-    ax2.set_ylabel('Standard Deviation')
-    ax2.set_xlabel('Timesteps')
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # Mean reward
-    ax3 = fig.add_subplot(gs[1, 0])
-    if agent.training_metrics['mean_reward']:  # Only plot if we have data
-        ax3.plot(agent.training_metrics['timesteps'][:len(agent.training_metrics['mean_reward'])], 
-                 agent.training_metrics['mean_reward'])
-    ax3.set_title('Mean Reward')
-    ax3.set_ylabel('Reward')
+    ax3.set_title('Parameter Evolution')
     ax3.set_xlabel('Timesteps')
+    ax3.set_ylabel('Parameter Std Dev')
+    ax3.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    # Parameter activity heatmap
+    # Plot reward distribution
     ax4 = fig.add_subplot(gs[1, 1])
-    param_data = []
-    for param in agent.raw_env.parameter_names:
-        if param in agent.training_metrics['parameter_updates']:
-            param_data.append(agent.training_metrics['parameter_updates'][param])
-    if param_data:  # Only plot if we have data
-        param_activity = np.array(param_data)
-        im = ax4.imshow(param_activity, aspect='auto', cmap='viridis')
-        ax4.set_title('Parameter Activity')
-        ax4.set_ylabel('Parameters')
-        ax4.set_yticks(range(len(agent.raw_env.parameter_names)))
-        ax4.set_yticklabels([p.split('|')[-1] for p in agent.raw_env.parameter_names])
-        plt.colorbar(im, ax=ax4)
+    if agent.training_metrics['episode_rewards']:
+        ax4.hist(agent.training_metrics['episode_rewards'], bins=30)
+        ax4.set_title('Reward Distribution')
+        ax4.set_xlabel('Reward')
+        ax4.set_ylabel('Frequency')
     
     plt.tight_layout()
     return fig
@@ -150,6 +281,42 @@ def create_training_dashboard():
     """Create a training monitoring dashboard"""
     st.subheader("Training Dashboard")
     
+    # Training Parameters
+    st.subheader("Training Parameters")
+    col1, col2 = st.columns(2)
+    with col1:
+        learning_rate = st.number_input(
+            "Learning Rate", 
+            min_value=1e-6, 
+            max_value=1e-2, 
+            value=3e-4, 
+            format="%.0e",
+            help="How quickly the agent learns (smaller = more stable but slower)"
+        )
+        n_steps = st.number_input(
+            "Steps per Update", 
+            min_value=512, 
+            max_value=8192, 
+            value=2048,
+            help="Number of steps to run before updating policy"
+        )
+    
+    with col2:
+        n_epochs = st.number_input(
+            "Number of Epochs", 
+            min_value=1, 
+            max_value=20, 
+            value=10,
+            help="How many times to reuse each batch of data"
+        )
+        clip_range = st.number_input(
+            "Clip Range", 
+            min_value=0.1, 
+            max_value=0.5, 
+            value=0.2,
+            help="How much the policy can change in one update"
+        )
+    
     # Live Metrics
     st.subheader("Training Metrics")
     metrics_cols = st.columns(4)
@@ -174,10 +341,15 @@ def create_training_dashboard():
     }
     
     # Plots
-    st.subheader("Training Plots")
-    plots_container = st.container()  # This will hold our plot
+    plots_container = st.container()
     
     return {
+        'parameters': {
+            'learning_rate': learning_rate,
+            'n_steps': n_steps,
+            'n_epochs': n_epochs,
+            'clip_range': clip_range
+        },
         'metric_placeholders': metric_placeholders,
         'progress_bar': progress_bar,
         'status_text': status_text,
@@ -291,200 +463,133 @@ def analyze_training_metrics(metrics_history):
 def main():
     logging.basicConfig(level=logging.INFO)
     st.title("Chemical Reactor Optimization")
-
-    # Sidebar controls
-    reactor_number = st.sidebar.selectbox(
-        "Select Reactor",
-        options=[2, 3, 4, 5, 6, 7]
-    )
     
-    # Multi-objective weights
-    st.sidebar.subheader("Optimization Weights")
-    weights = {
-        'CB': st.sidebar.slider("Production (CB) Weight", 0.0, 1.0, 0.5, 0.1,
-                               help="Higher value prioritizes production"),
-        'CO2': st.sidebar.slider("CO2 Reduction Weight", 0.0, 1.0, 0.25, 0.1,
-                                help="Higher value prioritizes CO2 reduction"),
-        'SO2': st.sidebar.slider("SO2 Reduction Weight", 0.0, 1.0, 0.25, 0.1,
-                                help="Higher value prioritizes SO2 reduction")
-    }
-
-    # Add variable selection in sidebar
-    st.sidebar.subheader("Parameter Selection")
+    # Initialize session state for training
+    if 'training_started' not in st.session_state:
+        st.session_state.training_started = False
     
-    # Group parameters for better organization
-    parameter_groups = {
-        "Main Controls": ['Erdgas', 'Konst.Stufe', 'Perlwasser', 'Regelstufe'],
-        "Temperature Controls": ['VL Temp', 'Makeöl|Temperatur'],
-        "Flow Controls": ['V-Luft', 'Fuelöl', 'Makeöl', 'Makeöl|Ventil'],
-        "Process Parameters": ['CCT', 'CTD', 'FCC', 'SCT'],
-        "Chemical Composition": ['C', 'H', 'N', 'O', 'S']
-    }
-
-    selected_parameters = {}
-    with st.sidebar.expander("Select Parameters to Optimize", expanded=True):
-        for group_name, params in parameter_groups.items():
-            st.write(f"**{group_name}**")
-            for param in params:
-                full_param = f"{reactor_number}|{param}"
-                selected_parameters[full_param] = st.checkbox(
-                    param, 
-                    value=True if param in ['Erdgas', 'V-Luft', 'Makeöl'] else False,  # Default selection
-                    key=f"param_select_{full_param}"
-                )
-    
-    # Get list of selected parameters
-    active_parameters = [param for param, selected in selected_parameters.items() if selected]
-    
-    if len(active_parameters) < 1:
-        st.warning("Please select at least one parameter to optimize")
-        return
-    elif len(active_parameters) > 10:
-        st.warning("Consider selecting fewer parameters for more efficient optimization")
-    
-    st.sidebar.info(f"Optimizing {len(active_parameters)} parameters")
-    
-    # Show selected parameters
-    with st.sidebar.expander("Selected Parameters", expanded=False):
-        for param in active_parameters:
-            st.write(f"- {param.split('|')[-1]}")
-    
-    # Normalize weights to sum to 1
-    total_weight = sum(weights.values())
-    if total_weight > 0:
-        weights = {k: v/total_weight for k, v in weights.items()}
-    
-        # Initialize environment and agent with proper error handling
-    try:
-        # First try to load the models to verify they exist
-        cb_model_path = f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras'
-        co2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras'
-        so2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
+    # Sidebar configuration
+    with st.sidebar:
+        # Reactor selection
+        reactor_number = st.selectbox("Select Reactor", [2], index=0)
         
-        if not all(os.path.exists(path) for path in [cb_model_path, co2_model_path, so2_model_path]):
-            st.error("One or more required LSTM models not found. Please check model paths.")
-            return
-        
-        # Initialize environment with existing models
-        env = ChemicalReactorEnv(reactor_number, weights=weights, 
-                                active_parameters=active_parameters)
-        agent = ReactorOptimizationAgent(reactor_number, weights=weights, 
-                                    active_parameters=active_parameters)
-        
-    except Exception as e:
-        st.error(f"Error initializing environment and agent: {str(e)}")
-        logging.exception("Initialization error details:")
-        return
-    
-
-
-    # Debug info
-    if st.checkbox("Show Debug Info"):
-        st.write("Model Configuration:")
-        st.write(f"- Expected timesteps: {env.expected_timesteps}")
-        st.write(f"- Expected features: {env.expected_features}")
-        st.write(f"- Active parameters: {len(active_parameters)}")
-        
-        # Show parameter mapping
-        st.write("\nParameter Mapping:")
-        for i, param in enumerate(env.parameter_names):
-            st.write(f"{i}: {param}")
-
-        st.write("Active Parameters:", active_parameters)
-        st.write("State Shape:", env.observation_space.shape)
-        st.write("Action Shape:", env.action_space.shape)
-        if hasattr(env, 'state'):
-            st.write("Current State (Active Parameters):", 
-                    {param: val for param, val in zip(env.parameter_names, env.state)})
-        st.write("Parameter Names:", env.parameter_names)
-        st.write("State Shape:", env.state.shape)
-        st.write("Parameter Config:", env.parameter_config)
-        st.write("Optimization Weights:", weights)
-        
-        if not env.using_dummy_model:
-            st.write("CB Model Shape:", env.cb_model.input_shape)
-            st.write("CO2 Model Shape:", env.co2_model.input_shape)
-            st.write("SO2 Model Shape:", env.so2_model.input_shape)
-
-    # Training section in sidebar
-    with st.sidebar.expander("Agent Training", expanded=True):
-        st.subheader("Training Parameters")
-        
-        # Training parameters
-        learning_rate = st.select_slider(
-            "Learning Rate",
-            options=[1e-5, 3e-5, 1e-4, 3e-4, 1e-3],
-            value=1e-4,
-            help="Smaller = more stable but slower learning",
-            key="sidebar_learning_rate"
-        )
-        
-        n_steps = st.select_slider(
-            "Steps per Update",
-            options=[1024, 2048, 4096, 8192],
-            value=4096,
-            help="Larger = more stable learning",
-            key="sidebar_n_steps"
-        )
-        
-        n_epochs = st.slider(
-            "Number of Epochs",
-            min_value=3,
-            max_value=10,
-            value=5,
-            help="How many times to reuse each batch of data",
-            key="sidebar_n_epochs"
-        )
-        
-        clip_range = st.select_slider(
-            "Clip Range",
-            options=[0.1, 0.15, 0.2, 0.25, 0.3],
-            value=0.15,
-            help="Smaller = more stable updates",
-            key="sidebar_clip_range"
-        )
-        
-        timesteps = st.select_slider(
-            "Training Timesteps",
-            options=[50000, 100000, 200000, 500000],
-            value=100000,
-            help="Total number of training steps",
-            key="sidebar_timesteps"
-        )
-        
-        # Try to load pre-trained agent
-        model_path = f"models/rl_agent_reactor_{reactor_number}_multi"
+        # Create a temporary environment to get parameter configurations
         try:
-            agent.load(model_path)
-            st.success("Loaded trained agent")
-        except:
-            st.warning("No trained agent found. Using untrained agent.")
-
-        # Training section
-        st.subheader("Training")
-        total_steps = st.number_input("Total timesteps", min_value=1000, value=10000, step=1000)
+            env = ChemicalReactorEnv(
+                reactor_number=reactor_number,
+                weights={'CB': 0.5, 'CO2': 0.25, 'SO2': 0.25}  # Default weights
+            )
             
-        if st.button("Train Agent"):
-            with st.spinner("Training in progress..."):
-                try:
-                    # Create progress callback
-                    progress_callback = TrainingCallback(total_steps=total_steps)
-                    
-                    # Train the agent
-                    agent.train(total_timesteps=total_steps, callback=progress_callback)
-                    
-                    # Show completion message
-                    st.success(f"Training completed in {agent.training_time:.1f} seconds!")
-                    
-                    # Show training metrics if available
-                    if hasattr(agent, 'training_metrics'):
-                        st.write("Training Metrics:")
-                        st.write(f"- Average steps/second: {np.mean(agent.training_metrics['steps_per_second']):.1f}")
-                        st.write(f"- Total steps: {agent.training_metrics['timesteps'][-1]}")
-                    
-                except Exception as e:
-                    st.error(f"Training error: {str(e)}")
-                    logging.exception("Training error details:")
+            # Parameter selection using environment's configuration
+            all_parameters = list(env.parameter_config.keys())
+            
+            active_parameters = st.multiselect(
+                "Select Parameters to Optimize",
+                all_parameters,
+                default=[f'{reactor_number}|Erdgas']
+            )
+            
+            # Weights configuration
+            st.subheader("Optimization Weights")
+            weights = {
+                'CB': st.slider("Production (CB)", 0.0, 1.0, 0.5),
+                'CO2': st.slider("CO2 Emissions", 0.0, 1.0, 0.25),
+                'SO2': st.slider("SO2 Emissions", 0.0, 1.0, 0.25)
+            }
+            
+        except Exception as e:
+            st.error("⚠️ Cannot initialize environment: Required LSTM models not found or invalid.")
+            st.error(f"Error details: {str(e)}")
+            return
+    
+    # Initialize agent with proper error handling
+    try:
+        if 'agent' not in st.session_state or st.session_state.get('active_params') != active_parameters:
+            agent = ReactorOptimizationAgent(
+                reactor_number=reactor_number,
+                weights=weights,
+                active_parameters=active_parameters
+            )
+            st.session_state.agent = agent
+            st.session_state.active_params = active_parameters
+        else:
+            agent = st.session_state.agent
+    except Exception as e:
+        st.error("⚠️ Cannot initialize training: Agent initialization failed.")
+        st.error(f"Error details: {str(e)}")
+        return
+    
+    # Create training controls and metric charts in sidebar
+    params, train_button, progress_container, progress_bar, speed_metrics = create_training_controls(
+        agent=st.session_state.agent,
+        active_parameters=active_parameters
+    )
+    metric_charts = create_metric_charts()
+    
+    # Handle training
+    if train_button:
+        st.session_state.training_started = True
+    
+    if st.session_state.training_started:
+        try:
+            # Create callback with all UI elements
+            callback = TrainingCallback(
+                total_steps=params['total_steps'],
+                metric_charts=metric_charts,
+                progress_container=progress_container,
+                progress_bar=progress_bar,
+                speed_metrics=speed_metrics
+            )
+            
+            # Update agent parameters
+            agent.set_parameters(
+                learning_rate=params['learning_rate'],
+                batch_size=params['batch_size'],
+                n_epochs=params['n_epochs']
+            )
+            
+            # Train the agent
+            agent.train(total_timesteps=params['total_steps'], callback=callback)
+            
+            # Reset training state after completion
+            st.session_state.training_started = False
+            st.sidebar.success(f"Training completed in {agent.training_time:.1f} seconds!")
+            
+        except Exception as e:
+            st.session_state.training_started = False
+            st.sidebar.error(f"Training error: {str(e)}")
+            logging.exception("Training error details:")
+
+    if st.button("Show Training Metrics"):
+        if hasattr(agent, 'training_metrics') and agent.training_metrics['timesteps']:
+            st.write("### Training Metrics")
+            
+            # Show summary statistics
+            st.write("**Summary Statistics:**")
+            st.write(f"- Total training time: {agent.training_time:.1f} seconds")
+            st.write(f"- Average steps/second: {np.mean(agent.training_metrics['steps_per_second']):.1f}")
+            if agent.training_metrics['mean_reward']:
+                st.write(f"- Final mean reward: {agent.training_metrics['mean_reward'][-1]:.2f}")
+            
+            # Show plots
+            fig = plot_training_metrics(agent)
+            if fig:
+                st.pyplot(fig)
+                
+            # Show parameter importance
+            st.write("\n**Parameter Activity:**")
+            param_activity = {}
+            for param, values in agent.training_metrics['parameter_updates'].items():
+                if values:
+                    param_activity[param.split('|')[-1]] = {
+                        'std_dev': np.mean(values),
+                        'change_rate': np.mean(np.abs(np.diff(values))) if len(values) > 1 else 0
+                    }
+            
+            activity_df = pd.DataFrame(param_activity).T
+            st.dataframe(activity_df.style.highlight_max(axis=0))
+        else:
+            st.warning("No training metrics available. Please train the agent first.")
 
     if st.button("Show Training Complexity Analysis"):
         if hasattr(agent, 'training_metrics') and agent.training_metrics['steps_per_second']:
@@ -494,7 +599,7 @@ def main():
             st.write(f"- Training Time: {agent.training_time:.2f} seconds")
             
             # Calculate efficiency metrics
-            steps_per_param = total_steps / len(active_parameters)
+            steps_per_param = params['total_steps'] / len(active_parameters)
             exploration_coverage = (agent.training_time * np.mean(agent.training_metrics['steps_per_second'])) / agent.complexity_metrics['total_combinations']
             
             st.write("\n**Efficiency Metrics:**")
@@ -513,7 +618,17 @@ def main():
     # Model Performance Tab
     with tabs[0]:
         st.header("LSTM Models Performance")
-        if not env.using_dummy_model:
+        
+        # Check if models exist
+        model_paths = {
+            'CB': f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras',
+            'CO2': f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras',
+            'SO2': f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
+        }
+        
+        models_exist = all(os.path.exists(path) for path in model_paths.values())
+        
+        if models_exist:
             # Show performance for all three objectives
             for objective in ['CB', 'CO2', 'SO2']:
                 st.subheader(f"{objective} Model Performance")
@@ -529,22 +644,8 @@ def main():
                     col1, col2 = st.columns(2)
                     col1.metric(f"{objective} Mean Squared Error", f"{mse:.4f}")
                     col2.metric(f"{objective} R² Score", f"{r2:.4f}")
-
-            st.header("RL Agent Performance")
-            if st.button("Evaluate Agent Performance"):
-                with st.spinner("Evaluating agent..."):
-                    fig, stats = plot_agent_performance(env, agent)
-                    st.pyplot(fig)
-                    
-                    # Show performance metrics for all objectives
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("CB Improvement", f"{stats['mean_improvements']['CB']:.1f}%")
-                    col2.metric("CO2 Reduction", f"{stats['mean_improvements']['CO2']:.1f}%",
-                              delta_color="inverse")
-                    col3.metric("SO2 Reduction", f"{stats['mean_improvements']['SO2']:.1f}%",
-                              delta_color="inverse")
         else:
-            st.warning("No trained models available. Using simulation mode.")
+            st.warning("Required LSTM models not found. Please ensure all models are available.")
     
     # Parameter Control Tab
     with tabs[1]:
@@ -575,8 +676,7 @@ def main():
                                 param,
                                 min_value=float(min_val),
                                 max_value=float(max_val),
-                                value=float(env.state[list(env.parameter_config.keys()).index(full_param)])
-                            )
+                                value=float(env.state[list(env.parameter_config.keys()).index(full_param)]))
             
             # Predict button
             if st.form_submit_button("Predict Output"):
@@ -683,285 +783,6 @@ def main():
                     new_values[param] = value
                 st.success("Applied suggested values! You can view them in the Parameter Control tab.")
 
-
-#def main():
-#    logging.basicConfig(level=logging.INFO)
-#    st.title("Chemical Reactor Optimization")
-#
-#    # Sidebar controls
-#    reactor_number = st.sidebar.selectbox(
-#        "Select Reactor",
-#        options=[2, 3, 4, 5, 6, 7]
-#    )
-#    
-#        # Replace optimization_target with weights
-#    st.sidebar.subheader("Optimization Weights")
-#    weights = {
-#        'CB': st.sidebar.slider("Production (CB) Weight", 0.0, 1.0, 0.5, 0.1,
-#                               help="Higher value prioritizes production"),
-#        'CO2': st.sidebar.slider("CO2 Reduction Weight", 0.0, 1.0, 0.25, 0.1,
-#                                help="Higher value prioritizes CO2 reduction"),
-#        'SO2': st.sidebar.slider("SO2 Reduction Weight", 0.0, 1.0, 0.25, 0.1,
-#                                help="Higher value prioritizes SO2 reduction")
-#    }
-#    
-#    # Normalize weights to sum to 1
-#    total_weight = sum(weights.values())
-#    if total_weight > 0:
-#        weights = {k: v/total_weight for k, v in weights.items()}
-#    
-#    # Initialize environment and agent with weights
-#    env = MultiObjectiveReactorEnv(reactor_number, weights)
-#    agent = ReactorOptimizationAgent(reactor_number, weights=weights)
-#
-#    # Debug info
-#    if st.checkbox("Show Debug Info"):
-#        st.write("Parameter Names:", env.parameter_names)
-#        st.write("State Shape:", env.state.shape)
-#        st.write("Parameter Config:", env.parameter_config)
-#        
-#        if not env.using_dummy_model:
-#            st.write("Model Input Shape:", env.prediction_model.input_shape)
-#            st.write("Model Output Shape:", env.prediction_model.output_shape)
-#
-#    # Training section in sidebar
-#    with st.sidebar.expander("Agent Training", expanded=True):
-#        st.subheader("Training Parameters")
-#        
-#        # Smaller learning rate for stability
-#        learning_rate = st.select_slider(
-#            "Learning Rate",
-#            options=[1e-5, 3e-5, 1e-4, 3e-4, 1e-3],
-#            value=1e-4,
-#            help="Smaller = more stable but slower learning",
-#            key="sidebar_learning_rate"
-#        )
-#        
-#        # Larger batch size for better stability
-#        n_steps = st.select_slider(
-#            "Steps per Update",
-#            options=[1024, 2048, 4096, 8192],
-#            value=4096,
-#            help="Larger = more stable learning",
-#            key="sidebar_n_steps"
-#        )
-#        
-#        # Fewer epochs to prevent overfitting
-#        n_epochs = st.slider(
-#            "Number of Epochs",
-#            min_value=3,
-#            max_value=10,
-#            value=5,
-#            help="How many times to reuse each batch of data",
-#            key="sidebar_n_epochs"
-#        )
-#        
-#        # Smaller clip range for stability
-#        clip_range = st.select_slider(
-#            "Clip Range",
-#            options=[0.1, 0.15, 0.2, 0.25, 0.3],
-#            value=0.15,
-#            help="Smaller = more stable updates",
-#            key="sidebar_clip_range"
-#        )
-#        
-#        # More timesteps for better learning
-#        timesteps = st.select_slider(
-#            "Training Timesteps",
-#            options=[50000, 100000, 200000, 500000],
-#            value=100000,
-#            help="Total number of training steps",
-#            key="sidebar_timesteps"
-#        )
-#        
-#        # Try to load pre-trained agent
-#        model_path = f"models/rl_agent_reactor_{reactor_number}_{optimization_target}"
-#        try:
-#            agent.load(model_path)
-#            st.success("Loaded trained agent")
-#        except:
-#            st.warning("No trained agent found. Using untrained agent.")
-#
-#        if st.button("Train Agent"):
-#            # Create a new tab for training
-#            training_tab = st.tabs(["Training Progress"])[0]
-#            with training_tab:
-#                dashboard = create_training_dashboard()
-#                try:
-#                    with st.spinner("Configuring agent..."):
-#                        # Validate parameters
-#                        lr = float(learning_rate)
-#                        steps = int(n_steps)
-#                        epochs = int(n_epochs)
-#                        clip = float(clip_range)
-#                        total_steps = int(timesteps)
-#                        
-#                        if lr <= 0:
-#                            raise ValueError("Learning rate must be positive")
-#                        if steps <= 0:
-#                            raise ValueError("Steps must be positive")
-#                        if epochs <= 0:
-#                            raise ValueError("Epochs must be positive")
-#                        if clip <= 0:
-#                            raise ValueError("Clip range must be positive")
-#                        
-#                        # Configure agent with validated parameters
-#                        agent.configure_training(
-#                            learning_rate=lr,
-#                            n_steps=steps,
-#                            n_epochs=epochs,
-#                            clip_range=clip
-#                        )
-#                    
-#                    # Create callback with dashboard
-#                    callback = TrainingCallback(dashboard)
-#                    
-#                    with st.spinner("Training agent..."):
-#                        # Train agent
-#                        agent.train(total_timesteps=total_steps, callback=callback)
-#                        agent.save(model_path)
-#                    
-#                    st.success("Training completed successfully!")
-#                    
-#                except ValueError as ve:
-#                    st.error(f"Invalid parameter: {str(ve)}")
-#                except Exception as e:
-#                    st.error(f"Error during training: {str(e)}")
-#                    logging.exception("Training error details:")
-#            recommendations = analyze_training_metrics(dashboard['metrics_history'])
-#            if recommendations:
-#                st.subheader("Training Recommendations")
-#                for rec in recommendations:
-#                    st.markdown(rec)
-#    
-#    # Create tabs
-#    tabs = st.tabs(["Model Performance", "Parameter Control", "Optimization"])
-#    
-#    # Model Performance Tab
-#    with tabs[0]:
-#        st.header("LSTM Model Performance")
-#        if not env.using_dummy_model:
-#            # Show performance for all three objectives
-#            for objective in ['CB', 'CO2', 'SO2']:
-#                st.subheader(f"{objective} Model Performance")
-#                fig = plot_model_performance(reactor_number, objective)
-#                if fig:
-#                    st.pyplot(fig)
-#                    
-#                    # Add performance metrics
-#                    test_data = pd.read_csv(f'models/test_data_reactor_{reactor_number}_{optimization_target}.csv')
-#                    mse = np.mean((test_data['actual'] - test_data['predicted'])**2)
-#                    r2 = np.corrcoef(test_data['actual'], test_data['predicted'])[0,1]**2
-#                    
-#                    col1, col2 = st.columns(2)
-#                    col1.metric("Mean Squared Error", f"{mse:.4f}")
-#                    col2.metric("R² Score", f"{r2:.4f}")
-#
-#            st.header("RL Agent Performance")
-#            if st.button("Evaluate Agent Performance"):
-#                with st.spinner("Evaluating agent..."):
-#                    fig, mean_reward, mean_improvement = plot_agent_performance(env, agent)
-#                    st.pyplot(fig)
-#                    
-#                    # Show performance metrics
-#                    col1, col2 = st.columns(2)
-#                    col1.metric("Mean Episode Reward", f"{mean_reward:.2f}")
-#                    col2.metric(f"Mean {optimization_target} Improvement", 
-#                              f"{mean_improvement:.1f}%",
-#                              delta_color="normal" if optimization_target == "CB" else "inverse")
-#        else:
-#            st.warning("No trained model available. Using simulation mode.")
-#    
-#    # Parameter Control Tab
-#    with tabs[1]:
-#        st.header("Parameter Control")
-#        
-#        # Group parameters by category
-#        parameter_groups = {
-#            "Main Controls": ['Erdgas', 'Konst.Stufe', 'Perlwasser', 'Regelstufe'],
-#            "Temperature Controls": ['VL Temp', 'Makeöl|Temperatur'],
-#            "Flow Controls": ['V-Luft', 'Fuelöl', 'Makeöl', 'Makeöl|Ventil'],
-#            "Process Parameters": ['CCT', 'CTD', 'FCC', 'SCT'],
-#            "Chemical Composition": ['C', 'H', 'N', 'O', 'S']
-#        }
-#        
-#        # Create form for parameters
-#        with st.form("parameter_form"):
-#            new_values = {}
-#            
-#            for group_name, params in parameter_groups.items():
-#                st.subheader(group_name)
-#                cols = st.columns(2)
-#                for i, param in enumerate(params):
-#                    full_param = f"{reactor_number}|{param}"
-#                    if full_param in env.parameter_config:
-#                        with cols[i % 2]:
-#                            min_val, max_val = env.parameter_config[full_param]
-#                            new_values[full_param] = st.slider(
-#                                param,
-#                                min_value=float(min_val),
-#                                max_value=float(max_val),
-#                                value=float(env.state[list(env.parameter_config.keys()).index(full_param)])
-#                            )
-#            
-#            # Predict button
-#            if st.form_submit_button("Predict Output"):
-#                state_array = np.array([new_values[param] for param in env.parameter_names])
-#                predictions = {
-#                    'CB': env.cb_model.predict(state_array.reshape(1, 1, -1))[0][0],
-#                    'CO2': env.co2_model.predict(state_array.reshape(1, 1, -1))[0][0],
-#                    'SO2': env.so2_model.predict(state_array.reshape(1, 1, -1))[0][0]
-#                }
-#                
-#                cols = st.columns(3)
-#                cols[0].metric("Predicted CB", f"{predictions['CB']:.2f}")
-#                cols[1].metric("Predicted CO2", f"{predictions['CO2']:.2f}")
-#                cols[2].metric("Predicted SO2", f"{predictions['SO2']:.2f}")
-#    
-#    # Optimization Tab
-#    with tabs[2]:
-#        st.header("Parameter Optimization")
-#        
-#        if st.button("Get Optimization Suggestions"):
-#            # Get current state and suggestions
-#            current_state = {param: new_values.get(param, env.state[i]) 
-#                           for i, param in enumerate(env.parameter_names)}
-#            suggestions = agent.suggest_parameters(current_state)
-#            
-#            # Display current vs suggested values
-#            st.subheader("Parameter Suggestions")
-#            
-#            for group_name, params in parameter_groups.items():
-#                st.write(f"\n**{group_name}**")
-#                cols = st.columns(3)
-#                cols[0].write("Parameter")
-#                cols[1].write("Current")
-#                cols[2].write("Suggested")
-#                
-#                for param in params:
-#                    full_param = f"{reactor_number}|{param}"
-#                    if full_param in suggestions:
-#                        cols = st.columns(3)
-#                        cols[0].write(param)
-#                        cols[1].write(f"{current_state[full_param]:.2f}")
-#                        cols[2].write(f"{suggestions[full_param]:.2f}")
-#            
-#            # Show expected improvement
-#            current_output = env._predict_output(np.array(list(current_state.values())))
-#            suggested_output = env._predict_output(np.array(list(suggestions.values())))
-#            
-#            st.metric(
-#                f"Expected {optimization_target}",
-#                f"{suggested_output:.2f}",
-#                f"{suggested_output - current_output:.2f}",
-#                delta_color="normal" if optimization_target == "CB" else "inverse"
-#            )
-#            
-#            # Add button to apply suggestions
-#            if st.button("Apply Suggested Values"):
-#                for param, value in suggestions.items():
-#                    new_values[param] = value
-#                st.success("Applied suggested values! You can view them in the Parameter Control tab.")
 
 if __name__ == "__main__":
     main()

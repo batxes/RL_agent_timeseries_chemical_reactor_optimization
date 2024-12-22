@@ -5,6 +5,7 @@ from tensorflow.keras.models import load_model
 import logging
 import os
 from datetime import datetime
+from src.predictors import load_lstm_model, DummyPredictor
 
 class ChemicalReactorEnv(gym.Env):
     def __init__(self, reactor_number, weights=None, active_parameters=None):
@@ -26,23 +27,21 @@ class ChemicalReactorEnv(gym.Env):
             'SO2': 0.25
         }
 
-        # Load models first to get input shape
+        # Load the required models
         try:
-            self.cb_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras')
-            self.co2_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras')
-            self.so2_model = load_model(f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras')
+            cb_model_path = f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras'
+            co2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras'
+            so2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
             
-            # Get expected input shape from model
-            self.expected_timesteps = self.cb_model.input_shape[1]
-            self.expected_features = self.cb_model.input_shape[2]
-            logging.info(f"Model expects input shape: (batch, {self.expected_timesteps}, {self.expected_features})")
+            if not all(os.path.exists(path) for path in [cb_model_path, co2_model_path, so2_model_path]):
+                raise FileNotFoundError("One or more required LSTM models not found")
+                
+            self.cb_model = load_model(cb_model_path)
+            self.co2_model = load_model(co2_model_path)
+            self.so2_model = load_model(so2_model_path)
             
-            self.using_dummy_model = False
         except Exception as e:
-            logging.warning(f"Error loading models: {e}. Using dummy predictor.")
-            self.using_dummy_model = True
-            self.expected_timesteps = 5
-            self.expected_features = 47
+            raise RuntimeError(f"Failed to load required LSTM models: {str(e)}")
 
         # Define controllable parameters and their ranges
         self.full_parameter_config = {
