@@ -6,6 +6,7 @@ import logging
 import os
 from datetime import datetime
 from src.predictors import load_lstm_model, DummyPredictor
+import pandas as pd
 
 class ChemicalReactorEnv(gym.Env):
     def __init__(self, reactor_number, weights=None, active_parameters=None):
@@ -27,113 +28,197 @@ class ChemicalReactorEnv(gym.Env):
             'SO2': 0.25
         }
 
-        # Load the required models
+        # Load and analyze data to get parameter ranges
         try:
+            data_path = f'data/df_cleaned_for_reactor_{reactor_number}_target_{reactor_number}|CB.tsv'
+            df = pd.read_csv(data_path, sep='\t')
+            
+            # Define controllable parameters and their ranges based on data
+            self.full_parameter_config = {}
+            
+            # List of parameters to analyze
+            params_to_check = [
+                f'{reactor_number}|Erdgas',
+                f'{reactor_number}|Konst.Stufe',
+                f'{reactor_number}|Perlwasser',
+                f'{reactor_number}|Regelstufe',
+                f'{reactor_number}|V-Luft',
+                f'{reactor_number}|VL Temp',
+                f'{reactor_number}|Fuelöl',
+                f'{reactor_number}|Makeöl',
+                f'{reactor_number}|Makeöl|Temperatur',
+                f'{reactor_number}|Makeöl|Ventil',
+                f'{reactor_number}|CCT',
+                f'{reactor_number}|CTD',
+                f'{reactor_number}|FCC',
+                f'{reactor_number}|SCT',
+                f'{reactor_number}|C',
+                f'{reactor_number}|H',
+                f'{reactor_number}|N',
+                f'{reactor_number}|O',
+                f'{reactor_number}|S'
+            ]
+            
+            # Calculate ranges with safety margins
+            for param in params_to_check:
+                if param in df.columns:
+                    min_val = df[param].min()
+                    max_val = df[param].max()
+                    mean_val = df[param].mean()
+                    std_val = df[param].std()
+                    
+                    # Add 10% margin to ranges
+                    margin = (max_val - min_val) * 0.1
+                    safe_min = max(0, min_val - margin)  # Ensure non-negative
+                    safe_max = max_val + margin
+                    
+                    self.full_parameter_config[param] = (safe_min, safe_max)
+                    
+                    # Log the ranges for verification
+                    logging.info(f"Parameter {param}:")
+                    logging.info(f"  Range: {safe_min:.2f} to {safe_max:.2f}")
+                    logging.info(f"  Mean: {mean_val:.2f}, Std: {std_val:.2f}")
+            
+            # Filter parameters based on selection
+            if active_parameters:
+                self.parameter_config = {
+                    param: self.full_parameter_config[param]
+                    for param in active_parameters
+                    if param in self.full_parameter_config
+                }
+            else:
+                self.parameter_config = self.full_parameter_config
+                
+            self.parameter_names = list(self.parameter_config.keys())
+            
+            # Update parameter_indices to only track active parameters
+            self.parameter_indices = {
+                param: i for i, param in enumerate(self.parameter_names)
+            }
+            
+            # Define action and observation spaces using actual ranges
+            self.action_space = spaces.Box(
+                low=np.array([config[0] for config in self.parameter_config.values()]),
+                high=np.array([config[1] for config in self.parameter_config.values()]),
+                dtype=np.float32
+            )
+            
+            self.observation_space = spaces.Box(
+                low=self.action_space.low,
+                high=self.action_space.high,
+                dtype=np.float32
+            )
+            
+            # Log the final configuration
+            logging.info("\nFinal parameter configuration:")
+            for param, (low, high) in self.parameter_config.items():
+                logging.info(f"{param}: [{low:.2f}, {high:.2f}]")
+            
+        except Exception as e:
+            logging.error(f"Error setting up parameter ranges: {str(e)}")
+            raise
+
+        # Load the required models with better error handling and GPU fallback
+        try:
+            import tensorflow as tf
+            
+            # Try to disable GPU if there are CUDA issues
+            try:
+                tf.config.set_visible_devices([], 'GPU')
+                logging.info("Disabled GPU due to potential CUDA issues. Using CPU instead.")
+            except:
+                logging.warning("Could not disable GPU explicitly")
+            
+            # Define model paths
             cb_model_path = f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras'
             co2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras'
             so2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
             
-            if not all(os.path.exists(path) for path in [cb_model_path, co2_model_path, so2_model_path]):
-                raise FileNotFoundError("One or more required LSTM models not found")
+            logging.info("\nLooking for models:")
+            logging.info(f"CB model path: {cb_model_path}")
+            logging.info(f"CO2 model path: {co2_model_path}")
+            logging.info(f"SO2 model path: {so2_model_path}")
+            
+            # Check if files exist
+            missing_models = []
+            for name, path in [
+                ('CB', cb_model_path),
+                ('CO2', co2_model_path),
+                ('SO2', so2_model_path)
+            ]:
+                if not os.path.exists(path):
+                    missing_models.append(f"{name} ({path})")
+                else:
+                    logging.info(f"Found {name} model at {path}")
+            
+            if missing_models:
+                raise FileNotFoundError(
+                    f"Missing LSTM models:\n" + 
+                    "\n".join(missing_models)
+                )
+            
+            # Load models with CPU fallback
+            with tf.device('/CPU:0'):
+                try:
+                    self.cb_model = load_model(cb_model_path)
+                    logging.info(f"Successfully loaded CB model from {cb_model_path}")
+                    
+                    self.co2_model = load_model(co2_model_path)
+                    logging.info(f"Successfully loaded CO2 model from {co2_model_path}")
+                    
+                    self.so2_model = load_model(so2_model_path)
+                    logging.info(f"Successfully loaded SO2 model from {so2_model_path}")
+                    
+                    # Verify models are loaded
+                    if not all([self.cb_model, self.co2_model, self.so2_model]):
+                        raise RuntimeError("One or more models failed to load properly")
+                    
+                    logging.info("All models loaded successfully!")
+                    
+                except Exception as e:
+                    raise RuntimeError(f"Error loading models: {str(e)}")
                 
-            self.cb_model = load_model(cb_model_path)
-            self.co2_model = load_model(co2_model_path)
-            self.so2_model = load_model(so2_model_path)
-            
         except Exception as e:
-            raise RuntimeError(f"Failed to load required LSTM models: {str(e)}")
+            logging.error(f"Failed to load required LSTM models: {str(e)}")
+            raise RuntimeError(f"Required LSTM models not found or invalid: {str(e)}")
 
-        # Define controllable parameters and their ranges
-        self.full_parameter_config = {
-            f'{reactor_number}|Erdgas': (0, 100),
-            f'{reactor_number}|Konst.Stufe': (0, 100),
-            f'{reactor_number}|Perlwasser': (0, 100),
-            f'{reactor_number}|Regelstufe': (0, 100),
-            f'{reactor_number}|Sorte': (0, 100),
-            f'{reactor_number}|V-Luft': (0, 100),
-            f'{reactor_number}|VL Temp': (0, 300),
-            f'{reactor_number}|Fuelöl': (0, 100),
-            f'{reactor_number}|Makeöl': (0, 100),
-            f'{reactor_number}|Makeöl|Temperatur': (0, 300),
-            f'{reactor_number}|Makeöl|Ventil': (0, 100),
-            f'{reactor_number}|CCT': (0, 100),
-            f'{reactor_number}|CTD': (0, 100),
-            f'{reactor_number}|FCC': (0, 100),
-            f'{reactor_number}|SCT': (0, 100),
-            f'{reactor_number}|C': (0, 100),
-            f'{reactor_number}|H': (0, 100),
-            f'{reactor_number}|N': (0, 100),
-            f'{reactor_number}|O': (0, 100),
-            f'{reactor_number}|S': (0, 100)
-        }
-
-                # Filter parameters based on selection
-        if active_parameters:
-            self.parameter_config = {
-                param: self.full_parameter_config[param]
-                for param in active_parameters
-                if param in self.full_parameter_config
-            }
-        else:
-            self.parameter_config = self.full_parameter_config
-            
-        self.parameter_names = list(self.parameter_config.keys())
-        # Update parameter_indices to only track active parameters
-        self.parameter_indices = {
-            param: i for i, param in enumerate(self.parameter_names)
-        }
-
-        # Store full parameter list for state management
-        self.full_parameter_list = list(self.full_parameter_config.keys())
-        self.full_state = np.array([
-            (self.full_parameter_config[param][0] + self.full_parameter_config[param][1]) / 2
-            for param in self.full_parameter_list
-        ])
-        
-        # Define action and observation spaces only for selected parameters
-        self.action_space = spaces.Box(
-            low=np.array([config[0] for config in self.parameter_config.values()]),
-            high=np.array([config[1] for config in self.parameter_config.values()]),
-            dtype=np.float32
-        )
-        
-        self.observation_space = spaces.Box(
-            low=self.action_space.low,
-            high=self.action_space.high,
-            dtype=np.float32
-        )
-
-        
-
-        # Define action and observation spaces (keep your existing spaces)
-        self.parameter_names = list(self.parameter_config.keys())
-        self.action_space = spaces.Box(
-            low=np.array([config[0] for config in self.parameter_config.values()]),
-            high=np.array([config[1] for config in self.parameter_config.values()]),
-            dtype=np.float32
-        )
-        self.observation_space = spaces.Box(
-            low=self.action_space.low,
-            high=self.action_space.high,
-            dtype=np.float32
-        )
-        
+        # Continue with the rest of initialization
         self.reset()
 
     def reset(self, seed=None):
+        """Reset the environment to initial state"""
         super().reset(seed=seed)
-        # Initialize full state with middle values
-        self.full_state = np.array([
-            (self.full_parameter_config[param][0] + self.full_parameter_config[param][1]) / 2
-            for param in self.full_parameter_list
-        ])
         
-        # Return only active parameters
-        self.state = np.array([
-            self.full_state[self.full_parameter_list.index(param)]
-            for param in self.parameter_names
-        ])
-        return self.state, {}
+        try:
+            # Convert dict_keys to list for all parameter configurations
+            full_param_list = list(self.full_parameter_config.keys())
+            active_param_list = list(self.parameter_config.keys())
+            
+            # Initialize full state with middle values
+            self.full_state = np.zeros(len(full_param_list))
+            for i, param in enumerate(full_param_list):
+                min_val, max_val = self.full_parameter_config[param]
+                self.full_state[i] = (min_val + max_val) / 2
+                
+            # Return only active parameters
+            self.state = np.array([
+                self.full_state[full_param_list.index(param)]
+                for param in active_param_list
+            ])
+            
+            logging.debug("Reset state:")
+            logging.debug(f"Full parameters: {full_param_list}")
+            logging.debug(f"Active parameters: {active_param_list}")
+            logging.debug(f"State shape: {self.state.shape}")
+            
+            return self.state, {}
+            
+        except Exception as e:
+            logging.error(f"Error in reset: {str(e)}")
+            logging.error("Parameter configurations:")
+            logging.error(f"Full config: {self.full_parameter_config}")
+            logging.error(f"Active config: {self.parameter_config}")
+            raise
 
     def _calculate_reward(self, predictions):
         """Calculate weighted reward from all objectives"""
@@ -157,46 +242,55 @@ class ChemicalReactorEnv(gym.Env):
         return reward
     
     def step(self, action):
-        """
-        Take a step in the environment using only active parameters.
-        """
-        # Clip action to valid ranges
-        clipped_action = np.clip(action, self.action_space.low, self.action_space.high)
-        
-        # Update full state with new actions for active parameters
-        for i, param in enumerate(self.parameter_names):
-            full_idx = self.full_parameter_list.index(param)
-            self.full_state[full_idx] = clipped_action[i]
-        
-        # Update current state with active parameters
-        self.state = np.array([
-            self.full_state[self.full_parameter_list.index(param)]
-            for param in self.parameter_names
-        ])
-        
-        # Get predictions using full state
-        predictions = self._predict_outputs(self.full_state)
-        
-        # Calculate reward
-        reward = self._calculate_reward(predictions)
-        
-        # Add penalties for large parameter changes
-        penalty = self._calculate_penalties(clipped_action)
-        reward -= penalty
-        
-        # Episode never done (continuous optimization)
-        done = False
-        
-        # Include predictions in info
-        info = {
-            'CB_pred': predictions['CB'],
-            'CO2_pred': predictions['CO2'],
-            'SO2_pred': predictions['SO2'],
-            'reward': reward,
-            'penalty': penalty
-        }
-        
-        return self.state, reward, done, False, info
+        """Take a step in the environment using only active parameters."""
+        try:
+            # Convert dict_keys to list for indexing
+            full_param_list = list(self.full_parameter_config.keys())
+            active_param_list = list(self.parameter_config.keys())
+            
+            # Clip action to valid ranges
+            clipped_action = np.clip(action, self.action_space.low, self.action_space.high)
+            
+            # Update full state with new actions for active parameters
+            for i, param in enumerate(active_param_list):
+                full_idx = full_param_list.index(param)
+                self.full_state[full_idx] = clipped_action[i]
+            
+            # Update current state with active parameters
+            self.state = np.array([
+                self.full_state[full_param_list.index(param)]
+                for param in active_param_list
+            ])
+            
+            # Get predictions using full state
+            predictions = self._predict_outputs(self.full_state)
+            
+            # Calculate reward
+            reward = self._calculate_reward(predictions)
+            
+            # Add penalties for large parameter changes
+            penalty = self._calculate_penalties(clipped_action)
+            reward -= penalty
+            
+            # Episode never done (continuous optimization)
+            done = False
+            
+            # Include predictions in info
+            info = {
+                'CB_pred': predictions['CB'],
+                'CO2_pred': predictions['CO2'],
+                'SO2_pred': predictions['SO2'],
+                'reward': reward,
+                'penalty': penalty
+            }
+            
+            return self.state, reward, done, False, info
+            
+        except Exception as e:
+            logging.error(f"Error in step: {str(e)}")
+            logging.error(f"Action shape: {action.shape if hasattr(action, 'shape') else type(action)}")
+            logging.error(f"Current state shape: {self.state.shape if hasattr(self.state, 'shape') else type(self.state)}")
+            raise
 
     def _prepare_model_input(self, state):
         """
@@ -300,25 +394,55 @@ class ChemicalReactorEnv(gym.Env):
             return self._prepare_model_input(state)
 
     def _predict_outputs(self, state):
-        """Predict all objectives using respective models"""
-        if self.using_dummy_model:
-            return {
-                'CB': np.mean(state) * 1.5,  # Dummy production
-                'CO2': 100 - np.mean(state),  # Dummy CO2 emissions
-                'SO2': 50 - np.mean(state)    # Dummy SO2 emissions
-            }
-        
+        """Predict outputs using LSTM models"""
         try:
-            model_input = self._prepare_model_input(state)
-            return {
-                'CB': float(self.cb_model.predict(model_input, verbose=0)[0][0]),
-                'CO2': float(self.co2_model.predict(model_input, verbose=0)[0][0]),
-                'SO2': float(self.so2_model.predict(model_input, verbose=0)[0][0])
-            }
+            # Create a full feature vector with zeros (47 features)
+            full_features = np.zeros(47)
+            
+            # Convert dict_keys to list for indexing
+            full_parameter_list = list(self.full_parameter_config.keys())
+            
+            # Map the active parameters to their correct positions
+            for i, param in enumerate(self.parameter_names):
+                try:
+                    idx = full_parameter_list.index(param)
+                    full_features[idx] = state[i] if isinstance(state, np.ndarray) else state
+                except ValueError:
+                    logging.error(f"Parameter {param} not found in full parameter list")
+                    logging.error(f"Available parameters: {full_parameter_list}")
+                    raise
+                
+            # Log the mapping for debugging
+            logging.debug("Parameter mapping:")
+            for i, param in enumerate(self.parameter_names):
+                idx = full_parameter_list.index(param)
+                logging.debug(f"  {param} -> position {idx}: value {full_features[idx]}")
+            
+            # Reshape for LSTM input (batch_size, timesteps=5, features=47)
+            state_array = np.tile(full_features, (5, 1))  # Repeat features for 5 timesteps
+            state_array = np.expand_dims(state_array, axis=0)  # Add batch dimension
+            
+            # Verify shape before prediction
+            if state_array.shape != (1, 5, 47):
+                raise ValueError(f"Invalid input shape: expected (1, 5, 47), got {state_array.shape}")
+            
+            # Get predictions using model.__call__ instead of predict
+            predictions = {}
+            for model_name, model in [('CB', self.cb_model), ('CO2', self.co2_model), ('SO2', self.so2_model)]:
+                try:
+                    prediction = model(state_array, training=False)
+                    predictions[model_name] = float(prediction.numpy()[0, 0])
+                except Exception as e:
+                    logging.error(f"Error predicting {model_name}: {str(e)}")
+                    predictions[model_name] = 0.0
+            
+            return predictions
+            
         except Exception as e:
-            logging.warning(f"Error in prediction: {e}. Using dummy values.")
-            self.using_dummy_model = True
-            return self._predict_outputs(state)
+            logging.error(f"Error in _predict_outputs: {str(e)}")
+            logging.error(f"State shape: {np.array(state).shape if hasattr(state, 'shape') else type(state)}")
+            # Return default predictions instead of raising
+            return {'CB': 0.0, 'CO2': 0.0, 'SO2': 0.0}
 
     def _calculate_penalties(self, action):
         penalty = 0
