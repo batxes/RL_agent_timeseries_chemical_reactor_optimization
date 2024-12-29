@@ -10,27 +10,23 @@ import pandas as pd
 
 class ChemicalReactorEnv(gym.Env):
     def __init__(self, reactor_number, weights=None, active_parameters=None):
-        """
-        Initialize environment with multiple LSTM models for different objectives.
-        
-        Args:
-            reactor_number: Reactor number (e.g., 2)
-            weights: Dictionary with weights for each objective
-                    Default: CB=0.5 (production), CO2=0.25, SO2=0.25 (emissions)
-        """
+        """Initialize environment"""
         super().__init__()
         self.reactor_number = reactor_number
-
+        
         # Set default weights if none provided
         self.weights = weights if weights is not None else {
             'CB': 0.5,    # Higher weight for production
             'CO2': 0.25,  # Lower weights for emissions
             'SO2': 0.25
         }
-
+        
         # Load and analyze data to get parameter ranges
         try:
             data_path = f'data/df_cleaned_for_reactor_{reactor_number}_target_{reactor_number}|CB.tsv'
+            if not os.path.exists(data_path):
+                raise FileNotFoundError(f"Data file not found: {data_path}")
+            
             df = pd.read_csv(data_path, sep='\t')
             
             # Define controllable parameters and their ranges based on data
@@ -69,9 +65,20 @@ class ChemicalReactorEnv(gym.Env):
                     
                     # Add 10% margin to ranges
                     margin = (max_val - min_val) * 0.1
-                    safe_min = max(0, min_val - margin)  # Ensure non-negative
-                    safe_max = max_val + margin
                     
+                    # Ensure min and max are different
+                    if min_val == max_val:
+                        # If they're the same, create a range around the value
+                        safe_min = max(0, min_val - abs(min_val * 0.1))
+                        safe_max = max_val + abs(max_val * 0.1)
+                    else:
+                        safe_min = max(0, min_val - margin)
+                        safe_max = max_val + margin
+                    
+                    # Double check that min and max are different
+                    if safe_min == safe_max:
+                        safe_max += 1.0  # Add a minimum difference
+                        
                     self.full_parameter_config[param] = (safe_min, safe_max)
                     
                     # Log the ranges for verification
@@ -96,91 +103,95 @@ class ChemicalReactorEnv(gym.Env):
                 param: i for i, param in enumerate(self.parameter_names)
             }
             
-            # Define action and observation spaces using actual ranges
+            # Define action and observation spaces using normalized [-1, 1] range
             self.action_space = spaces.Box(
-                low=np.array([config[0] for config in self.parameter_config.values()]),
-                high=np.array([config[1] for config in self.parameter_config.values()]),
+                low=-1.0,
+                high=1.0,
+                shape=(len(self.parameter_config),),
                 dtype=np.float32
             )
             
+            # Observation space matches action space for this environment
             self.observation_space = spaces.Box(
-                low=self.action_space.low,
-                high=self.action_space.high,
+                low=-1.0,
+                high=1.0,
+                shape=(len(self.parameter_config),),
                 dtype=np.float32
             )
+            
+            # Store parameter ranges for scaling
+            self.parameter_ranges = {
+                param: (config[0], config[1]) 
+                for param, config in self.parameter_config.items()
+            }
+            
+            logging.info("Action/Observation spaces initialized:")
+            logging.info(f"Action space: {self.action_space}")
+            logging.info(f"Observation space: {self.observation_space}")
+            logging.info(f"Parameter ranges: {self.parameter_ranges}")
             
             # Log the final configuration
             logging.info("\nFinal parameter configuration:")
             for param, (low, high) in self.parameter_config.items():
                 logging.info(f"{param}: [{low:.2f}, {high:.2f}]")
             
-        except Exception as e:
-            logging.error(f"Error setting up parameter ranges: {str(e)}")
-            raise
-
-        # Load the required models with better error handling and GPU fallback
-        try:
-            import tensorflow as tf
-            
-            # Try to disable GPU if there are CUDA issues
+            # Load the required models with better error handling
             try:
-                tf.config.set_visible_devices([], 'GPU')
-                logging.info("Disabled GPU due to potential CUDA issues. Using CPU instead.")
-            except:
-                logging.warning("Could not disable GPU explicitly")
-            
-            # Define model paths
-            cb_model_path = f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras'
-            co2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras'
-            so2_model_path = f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
-            
-            logging.info("\nLooking for models:")
-            logging.info(f"CB model path: {cb_model_path}")
-            logging.info(f"CO2 model path: {co2_model_path}")
-            logging.info(f"SO2 model path: {so2_model_path}")
-            
-            # Check if files exist
-            missing_models = []
-            for name, path in [
-                ('CB', cb_model_path),
-                ('CO2', co2_model_path),
-                ('SO2', so2_model_path)
-            ]:
-                if not os.path.exists(path):
-                    missing_models.append(f"{name} ({path})")
-                else:
-                    logging.info(f"Found {name} model at {path}")
-            
-            if missing_models:
-                raise FileNotFoundError(
-                    f"Missing LSTM models:\n" + 
-                    "\n".join(missing_models)
-                )
-            
-            # Load models with CPU fallback
-            with tf.device('/CPU:0'):
+                import tensorflow as tf
+                
+                # Try to disable GPU if there are CUDA issues
                 try:
-                    self.cb_model = load_model(cb_model_path)
-                    logging.info(f"Successfully loaded CB model from {cb_model_path}")
+                    tf.config.set_visible_devices([], 'GPU')
+                    logging.info("Disabled GPU due to potential CUDA issues. Using CPU instead.")
+                except:
+                    logging.warning("Could not disable GPU explicitly")
+                
+                # Define model paths
+                model_paths = {
+                    'CB': f'models/lstm_model_reactor_{reactor_number}_target_{reactor_number}|CB.keras',
+                    'CO2': f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} CO2.keras',
+                    'SO2': f'models/lstm_model_reactor_{reactor_number}_target_R{reactor_number} SO2.keras'
+                }
+                
+                # Check if all model files exist
+                missing_models = [
+                    name for name, path in model_paths.items() 
+                    if not os.path.exists(path)
+                ]
+                
+                if missing_models:
+                    raise FileNotFoundError(
+                        "Missing LSTM models:\n" + 
+                        "\n".join(f"- {name}: {model_paths[name]}" 
+                                 for name in missing_models)
+                    )
+                
+                # Load models with CPU fallback
+                with tf.device('/CPU:0'):
+                    self.models = {}
+                    for name, path in model_paths.items():
+                        try:
+                            self.models[name] = load_model(path)
+                            logging.info(f"Successfully loaded {name} model from {path}")
+                        except Exception as e:
+                            raise RuntimeError(f"Error loading {name} model: {str(e)}")
                     
-                    self.co2_model = load_model(co2_model_path)
-                    logging.info(f"Successfully loaded CO2 model from {co2_model_path}")
-                    
-                    self.so2_model = load_model(so2_model_path)
-                    logging.info(f"Successfully loaded SO2 model from {so2_model_path}")
-                    
-                    # Verify models are loaded
-                    if not all([self.cb_model, self.co2_model, self.so2_model]):
-                        raise RuntimeError("One or more models failed to load properly")
+                    # Verify all models are loaded
+                    if len(self.models) != 3:
+                        raise RuntimeError(
+                            f"Expected 3 models, but loaded {len(self.models)}: "
+                            f"{list(self.models.keys())}"
+                        )
                     
                     logging.info("All models loaded successfully!")
                     
-                except Exception as e:
-                    raise RuntimeError(f"Error loading models: {str(e)}")
-                
+            except Exception as e:
+                logging.error(f"Failed to load required LSTM models: {str(e)}")
+                raise RuntimeError(f"Required LSTM models not found or invalid: {str(e)}")
+            
         except Exception as e:
-            logging.error(f"Failed to load required LSTM models: {str(e)}")
-            raise RuntimeError(f"Required LSTM models not found or invalid: {str(e)}")
+            logging.error(f"Error initializing environment: {str(e)}")
+            raise
 
         # Continue with the rest of initialization
         self.reset()
@@ -226,20 +237,39 @@ class ChemicalReactorEnv(gym.Env):
             self.last_predictions = predictions
             return 0
         
-        # Calculate improvements (or reductions) for each objective
-        improvements = {
-            'CB': (predictions['CB'] - self.last_predictions['CB']) / max(1e-6, self.last_predictions['CB']),
-            'CO2': -(predictions['CO2'] - self.last_predictions['CO2']) / max(1e-6, self.last_predictions['CO2']),
-            'SO2': -(predictions['SO2'] - self.last_predictions['SO2']) / max(1e-6, self.last_predictions['SO2'])
-        }
-        
-        # Store current predictions for next step
-        self.last_predictions = predictions
-        
-        # Calculate weighted sum of improvements
-        reward = sum(self.weights[obj] * imp for obj, imp in improvements.items())
-        
-        return reward
+        try:
+            # Calculate relative improvements for each objective
+            improvements = {
+                'CB': (predictions['CB'] - self.last_predictions['CB']) / max(1e-6, abs(self.last_predictions['CB'])),
+                'CO2': -(predictions['CO2'] - self.last_predictions['CO2']) / max(1e-6, abs(self.last_predictions['CO2'])),
+                'SO2': -(predictions['SO2'] - self.last_predictions['SO2']) / max(1e-6, abs(self.last_predictions['SO2']))
+            }
+            
+            # Calculate weighted sum of improvements
+            reward = sum(self.weights[obj] * imp for obj, imp in improvements.items())
+            
+            # Add stability penalty
+            if hasattr(self, 'last_state'):
+                change = np.abs(self.state - self.last_state).mean()
+                stability_penalty = change * 0.5  # Penalize large changes
+                reward -= stability_penalty
+                logging.info(f"State change: {change:.4f}, Stability penalty: {stability_penalty:.4f}")
+            
+            # Store current values for next step
+            self.last_predictions = predictions
+            self.last_state = self.state.copy()
+            
+            # Clip reward to reasonable range
+            reward = np.clip(reward, -1.0, 1.0)
+            
+            logging.info(f"Improvements: {improvements}")
+            logging.info(f"Final reward: {reward:.4f}")
+            
+            return reward
+            
+        except Exception as e:
+            logging.error(f"Error calculating reward: {str(e)}")
+            return 0.0
     
     def step(self, action):
         """Take a step in the environment using only active parameters."""
@@ -248,13 +278,34 @@ class ChemicalReactorEnv(gym.Env):
             full_param_list = list(self.full_parameter_config.keys())
             active_param_list = list(self.parameter_config.keys())
             
-            # Clip action to valid ranges
-            clipped_action = np.clip(action, self.action_space.low, self.action_space.high)
+            # Ensure action is within action space bounds
+            action = np.clip(action, self.action_space.low, self.action_space.high)
+            
+            # Store previous predictions for reward calculation
+            if hasattr(self, 'last_predictions'):
+                prev_predictions = self.last_predictions.copy()
+            else:
+                prev_predictions = None
             
             # Update full state with new actions for active parameters
             for i, param in enumerate(active_param_list):
                 full_idx = full_param_list.index(param)
-                self.full_state[full_idx] = clipped_action[i]
+                min_val, max_val = self.parameter_config[param]
+                
+                # Linear interpolation from [-1, 1] to [min_val, max_val]
+                scaled_action = min_val + (action[i] + 1) * (max_val - min_val) / 2
+                
+                # Ensure we're not getting exactly min or max unless action is exactly -1 or 1
+                if action[i] != -1 and action[i] != 1:
+                    # Add small random noise to prevent getting stuck at specific values
+                    noise = np.random.uniform(-0.01, 0.01) * (max_val - min_val)
+                    scaled_action += noise
+                
+                # Final clip to ensure we stay within bounds
+                scaled_action = np.clip(scaled_action, min_val, max_val)
+                
+                self.full_state[full_idx] = scaled_action
+                logging.info(f"Parameter {param}: raw_action={action[i]:.4f}, scaled={scaled_action:.4f}")
             
             # Update current state with active parameters
             self.state = np.array([
@@ -262,34 +313,95 @@ class ChemicalReactorEnv(gym.Env):
                 for param in active_param_list
             ])
             
-            # Get predictions using full state
-            predictions = self._predict_outputs(self.full_state)
+            logging.info(f"Updated state: {self.state}")
             
-            # Calculate reward
-            reward = self._calculate_reward(predictions)
+            # Get predictions using LSTM models
+            try:
+                predictions = {
+                    'CB': float(self.models['CB'].predict(self._prepare_model_input(self.full_state), verbose=0)),
+                    'CO2': float(self.models['CO2'].predict(self._prepare_model_input(self.full_state), verbose=0)),
+                    'SO2': float(self.models['SO2'].predict(self._prepare_model_input(self.full_state), verbose=0))
+                }
+            except Exception as e:
+                logging.error(f"Prediction error: {e}")
+                predictions = prev_predictions if prev_predictions else {'CB': 0.0, 'CO2': 0.0, 'SO2': 0.0}
+
+            # Initialize reward tracking if not exists
+            if not hasattr(self, 'reward_history'):
+                self.reward_history = []
+                self.best_cb = float('-inf')
+                self.worst_cb = float('inf')
             
-            # Add penalties for large parameter changes
-            penalty = self._calculate_penalties(clipped_action)
-            reward -= penalty
+            # Calculate normalized reward
+            reward = 0.0
+            if prev_predictions is not None:
+                # Update best/worst CB values
+                self.best_cb = max(self.best_cb, predictions['CB'])
+                self.worst_cb = min(self.worst_cb, predictions['CB'])
+                
+                # Calculate relative improvements
+                cb_range = max(self.best_cb - self.worst_cb, 1e-3)
+                cb_norm = (predictions['CB'] - self.worst_cb) / cb_range
+                
+                # Calculate emission reductions (normalized)
+                if prev_predictions['CO2'] > 0:
+                    co2_reduction = max(0, (prev_predictions['CO2'] - predictions['CO2']) / prev_predictions['CO2'])
+                else:
+                    co2_reduction = 0
+                    
+                if prev_predictions['SO2'] > 0:
+                    so2_reduction = max(0, (prev_predictions['SO2'] - predictions['SO2']) / prev_predictions['SO2'])
+                else:
+                    so2_reduction = 0
+                
+                # Combine rewards with weights
+                reward = (
+                    self.weights['CB'] * cb_norm +
+                    self.weights['CO2'] * co2_reduction +
+                    self.weights['SO2'] * so2_reduction
+                )
+                
+                # Clip reward to reasonable range
+                reward = np.clip(reward, -1.0, 1.0)
+                
+                # Store reward for normalization
+                self.reward_history.append(reward)
+                if len(self.reward_history) > 1000:  # Keep last 1000 rewards
+                    self.reward_history.pop(0)
+                
+                logging.info(f"CB normalized: {cb_norm:.4f}")
+                logging.info(f"CO2 reduction: {co2_reduction:.4f}")
+                logging.info(f"SO2 reduction: {so2_reduction:.4f}")
+                logging.info(f"Final reward: {reward:.4f}")
             
-            # Episode never done (continuous optimization)
+            # Store predictions for next step
+            self.last_predictions = predictions
+            
+            # Add small exploration bonus (normalized)
+            if not hasattr(self, 'visited_states'):
+                self.visited_states = {}
+            
+            state_key = tuple(np.round(self.state / 10) * 10)
+            if state_key not in self.visited_states:
+                self.visited_states[state_key] = 0
+                reward += 0.1  # Small bonus for new states
+            self.visited_states[state_key] += 1
+            
+            # Episode never done
             done = False
             
-            # Include predictions in info
+            # Include detailed info
             info = {
-                'CB_pred': predictions['CB'],
-                'CO2_pred': predictions['CO2'],
-                'SO2_pred': predictions['SO2'],
+                'predictions': predictions,
                 'reward': reward,
-                'penalty': penalty
+                'normalized_cb': cb_norm if prev_predictions else 0.0,
+                'visits': self.visited_states[state_key]
             }
             
             return self.state, reward, done, False, info
             
         except Exception as e:
             logging.error(f"Error in step: {str(e)}")
-            logging.error(f"Action shape: {action.shape if hasattr(action, 'shape') else type(action)}")
-            logging.error(f"Current state shape: {self.state.shape if hasattr(self.state, 'shape') else type(self.state)}")
             raise
 
     def _prepare_model_input(self, state):
@@ -460,3 +572,32 @@ class ChemicalReactorEnv(gym.Env):
         penalty += np.sum(np.maximum(0, changes - max_allowed_changes)) * 0.01
         
         return penalty
+
+    def _calculate_base_reward(self, predictions):
+        """Calculate base reward without stability penalty"""
+        if not hasattr(self, 'last_predictions'):
+            self.last_predictions = predictions
+            return 0.0
+        
+        try:
+            # Calculate relative improvements
+            improvements = {
+                'CB': (predictions['CB'] - self.last_predictions['CB']) / max(abs(self.last_predictions['CB']), 1e-6),
+                'CO2': -(predictions['CO2'] - self.last_predictions['CO2']) / max(abs(self.last_predictions['CO2']), 1e-6),
+                'SO2': -(predictions['SO2'] - self.last_predictions['SO2']) / max(abs(self.last_predictions['SO2']), 1e-6)
+            }
+            
+            # Calculate weighted reward
+            reward = sum(self.weights[obj] * imp for obj, imp in improvements.items())
+            
+            # Store current predictions for next step
+            self.last_predictions = predictions.copy()
+            
+            logging.info(f"Improvements: {improvements}")
+            logging.info(f"Base reward: {reward:.4f}")
+            
+            return reward
+            
+        except Exception as e:
+            logging.error(f"Error calculating base reward: {str(e)}")
+            return 0.0

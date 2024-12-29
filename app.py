@@ -22,7 +22,7 @@ def create_training_controls(agent, active_parameters):
         st.info(f"Model Configuration:\n"
                 f"- Parameters to optimize: {n_params}\n"
                 f"- Network complexity: {agent.training_metrics['network_size']:,} parameters\n"
-                f"- Batch size: {agent.model.batch_size}")
+                )
         
         # Training parameters
         params = {}
@@ -63,23 +63,22 @@ def create_metric_charts():
         # Charts
         st.markdown("### Episode Reward")
         metrics['reward_chart'] = st.empty()  # For reward plot
-        st.markdown("- Green area: > 0.7 (Good)")
-        st.markdown("- Red area: < 0.3 (Poor)")
+        st.markdown("- more than 0.7 (Good)")
         
         st.markdown("### Policy Loss")
-        metrics['loss_chart'] = st.empty()  # For policy loss plot
-        st.markdown("- Green area: < 0.02 (Good)")
-        st.markdown("- Red area: > 0.1 (Poor)")
+        metrics['policy_chart'] = st.empty()  # Changed from loss_chart to policy_chart
+        st.markdown("- < 0.02 (Good)")
         
         st.markdown("### Value Loss")
         metrics['value_chart'] = st.empty()  # For value loss plot
-        st.markdown("- Green area: < 0.1 (Good)")
-        st.markdown("- Red area: > 0.5 (Poor)")
+        st.markdown("- < 0.1 (Good)")
         
         st.markdown("### Action Standard Deviation")
         metrics['std_chart'] = st.empty()  # For std plot
-        st.markdown("- Green area: 0.1 - 0.3 (Good)")
-        st.markdown("- Red area: < 0.1 or > 0.3 (Poor)")
+        st.markdown("- 0.1 - 0.3 (Good)")
+
+        st.markdown("### Current Parameter Values")
+        metrics['active_params'] = st.empty()  # For parameter values
         
         return metrics
 
@@ -91,14 +90,6 @@ class TrainingCallback(BaseCallback):
         self.progress_container = progress_container
         self.progress_bar = progress_bar
         self.speed_metrics = speed_metrics
-        
-        # Define thresholds for each metric
-        self.thresholds = {
-            'reward': {'good': 0.7, 'poor': 0.3},
-            'policy_loss': {'good': 0.02, 'poor': 0.1},
-            'value_loss': {'good': 0.1, 'poor': 0.5},
-            'std': {'good': 0.3, 'poor': 0.1}
-        }
         
         # Initialize timing variables
         self.start_time = time.time()
@@ -112,112 +103,124 @@ class TrainingCallback(BaseCallback):
             'value_losses': [],
             'stds': []
         }
-        
-        # Create parameter display in sidebar
-        with st.sidebar:
-            self.param_container = st.empty()
-    
-    def _plot_metric_with_thresholds(self, data, metric_name, chart_container):
-        """Plot metric with threshold lines and optimal areas"""
-        if len(data) == 0:
-            return
-        
-        # Create DataFrame with metric data
-        df = pd.DataFrame()
-        df['value'] = data
-        df.index = range(len(data))
-        
-        # Add threshold lines
-        good_threshold = self.thresholds[metric_name]['good']
-        poor_threshold = self.thresholds[metric_name]['poor']
-        
-        # Create the optimal area based on metric type
-        if metric_name in ['policy_loss', 'value_loss']:
-            # For losses, lower is better
-            df['optimal_area'] = good_threshold
-            df['warning_area'] = poor_threshold
-        elif metric_name == 'std':
-            # For std, medium range is better
-            df['optimal_min'] = poor_threshold
-            df['optimal_max'] = good_threshold
-        else:  # reward
-            # For reward, higher is better
-            df['optimal_area'] = good_threshold
-            df['warning_area'] = poor_threshold
-        
-        # Plot with Streamlit
-        chart_container.line_chart(df, use_container_width=True)
     
     def _on_step(self) -> bool:
         """Update progress and metrics in real-time"""
         current_time = time.time()
-        elapsed = current_time - self.last_update_time
         
-        # Update progress and parameters every 10 steps
-        if self.num_timesteps % 10 == 0:
-            # Get current parameters and their values
-            if hasattr(self.training_env, 'get_attr'):
-                param_names = self.training_env.get_attr('parameter_names')[0]
-                current_state = self.training_env.get_attr('state')[0]
-                
-                # Create parameter table
-                param_data = []
-                for name, value in zip(param_names, current_state):
-                    param_data.append({
-                        "Parameter": name,
-                        "Value": f"{value:.2f}"
-                    })
-                
-                # Display parameters in sidebar
-                self.param_container.table(pd.DataFrame(param_data))
+        # Calculate progress percentage
+        progress = self.num_timesteps / self.total_steps
+        self.progress_bar.progress(progress)
+        
+        # Calculate speed metrics
+        elapsed_time = current_time - self.start_time
+        steps_since_last = self.num_timesteps - self.last_steps
+        time_since_last = current_time - self.last_update_time
+        
+        if time_since_last > 0:
+            steps_per_second = steps_since_last / time_since_last
+            time_per_step = time_since_last / steps_since_last if steps_since_last > 0 else 0
             
-            # Get metrics directly from the model's rollout buffer
-            if hasattr(self.model, 'rollout_buffer') and self.model.rollout_buffer is not None:
-                # Get reward
-                if hasattr(self.model.rollout_buffer, 'rewards'):
-                    mean_reward = np.mean(self.model.rollout_buffer.rewards)
-                    self.metrics_data['rewards'].append(mean_reward)
-                    logging.info(f"Updating reward chart with value: {mean_reward}")
-                    self._plot_metric_with_thresholds(
-                        self.metrics_data['rewards'],
-                        'reward',
-                        self.metric_charts['reward_chart']
-                    )
-                else:
-                    logging.warning("No rewards found in rollout buffer")
+            # Estimate remaining time
+            remaining_steps = self.total_steps - self.num_timesteps
+            estimated_time = remaining_steps * time_per_step if time_per_step > 0 else 0
+            
+            # Update speed metrics in sidebar
+            self.speed_metrics['steps_per_second'].text(f"Steps/second: {steps_per_second:.1f}")
+            self.speed_metrics['time_per_step'].text(f"Time/step: {time_per_step*1000:.1f}ms")
+            self.speed_metrics['estimated_time'].text(f"Estimated time: {str(timedelta(seconds=int(estimated_time)))}")
+            
+            # Update progress text
+            self.progress_container.text(f"Progress: {progress*100:.1f}% ({self.num_timesteps}/{self.total_steps} steps)")
+        
+        # Update metrics every 10 steps
+        if self.num_timesteps % 10 == 0:
+            try:
+                # Get metrics from rollout buffer
+                if hasattr(self.model, 'rollout_buffer') and self.model.rollout_buffer is not None:
+                    buffer = self.model.rollout_buffer
+                    
+                    # Get policy loss (approximated from advantages)
+                    if hasattr(buffer, 'advantages'):
+                        policy_loss = -np.mean(buffer.advantages)
+                        self.metrics_data['policy_losses'].append(policy_loss)
+                        df = pd.DataFrame({'value': self.metrics_data['policy_losses']})
+                        self.metric_charts['policy_chart'].line_chart(df)
+                        logging.info(f"Policy loss: {policy_loss}")
+                    
+                    # Get value loss (approximated from returns and values)
+                    if hasattr(buffer, 'returns') and hasattr(buffer, 'values'):
+                        value_loss = np.mean(np.square(buffer.returns - buffer.values))
+                        self.metrics_data['value_losses'].append(value_loss)
+                        df = pd.DataFrame({'value': self.metrics_data['value_losses']})
+                        self.metric_charts['value_chart'].line_chart(df)
+                        logging.info(f"Value loss: {value_loss}")
+                    
+                    # Get rewards from the buffer
+                    if hasattr(buffer, 'rewards'):
+                        rewards = buffer.rewards
+                        mean_reward = np.mean(rewards)
+                        self.metrics_data['rewards'].append(mean_reward)
+                        df = pd.DataFrame({'value': self.metrics_data['rewards']})
+                        self.metric_charts['reward_chart'].line_chart(df)
+                        logging.info(f"Mean reward from buffer: {mean_reward}")
                 
-                # Get action std from the policy
-                if hasattr(self.model.policy, 'log_std'):
-                    action_std = np.exp(self.model.policy.log_std.detach().numpy().mean())
-                    self.metrics_data['stds'].append(action_std)
-                    logging.info(f"Updating std chart with value: {action_std}")
-                    self._plot_metric_with_thresholds(
-                        self.metrics_data['stds'],
-                        'std',
-                        self.metric_charts['std_chart']
-                    )
-                else:
-                    logging.warning("No log_std found in policy")
+                # Get action standard deviation from policy
+                if hasattr(self.model, 'policy') and hasattr(self.model.policy, 'get_distribution'):
+                    if hasattr(self.model, '_last_obs') and self.model._last_obs is not None:
+                        import torch
+                        obs_tensor = torch.as_tensor(self.model._last_obs).float()
+                        actions_std = self.model.policy.get_distribution(obs_tensor).distribution.stddev.mean().item()
+                        self.metrics_data['stds'].append(actions_std)
+                        df = pd.DataFrame({'value': self.metrics_data['stds']})
+                        self.metric_charts['std_chart'].line_chart(df)
+                        logging.info(f"Action std: {actions_std}")
                 
-                # Update policy loss data
-                if 'train/policy_loss' in self.model.logger.name_to_value:
-                    self.metrics_data['policy_losses'].append(self.model.logger.name_to_value['train/policy_loss'])
-                    self._plot_metric_with_thresholds(
-                        self.metrics_data['policy_losses'], 
-                        'policy_loss', 
-                        self.metric_charts['loss_chart']
-                    )
-                
-                # Update value loss data
-                if 'train/value_loss' in self.model.logger.name_to_value:
-                    self.metrics_data['value_losses'].append(self.model.logger.name_to_value['train/value_loss'])
-                    self._plot_metric_with_thresholds(
-                        self.metrics_data['value_losses'], 
-                        'value_loss', 
-                        self.metric_charts['value_chart']
-                    )
+                # Update all active parameters' values
+                if hasattr(self.model, 'env') and hasattr(self.model.env, 'envs'):
+                    env = self.model.env.envs[0]  # Get the first environment
+                    if hasattr(env, 'state') and hasattr(env, 'parameter_names') and hasattr(env, 'active_parameters'):
+                        # Create markdown text for all active parameters
+                        param_text = ""
+                        for param in env.active_parameters:
+                            param_idx = env.parameter_names.index(param)
+                            param_value = env.state[param_idx]
+                            # Display parameter name without reactor number prefix
+                            param_name = param.split('|')[-1]
+                            param_text += f"**{param_name}**: {param_value:.3f}\n"
+                        
+                        # Update display
+                        self.metric_charts['active_params'].markdown(param_text)
+                        logging.info(f"Current parameter values:\n{param_text}")
+            
+            except Exception as e:
+                logging.error(f"Error updating parameter values: {str(e)}")
+                logging.error(traceback.format_exc())
+        
+        # Update timing variables
+        self.last_update_time = current_time
+        self.last_steps = self.num_timesteps
         
         return True
+
+    def _plot_metric_with_thresholds(self, data, metric_name, chart_container):
+        """Plot metric with threshold lines and optimal areas"""
+        try:
+            if len(data) == 0:
+                logging.info(f"No data for {metric_name}")
+                return
+            
+            # Create DataFrame with metric data
+            df = pd.DataFrame({'value': data})
+            
+            # Debug: Print DataFrame before plotting
+            logging.info(f"Plotting {metric_name} data: {df.head()}")
+            
+            # Plot with Streamlit
+            chart_container.line_chart(df)
+            
+        except Exception as e:
+            logging.error(f"Error plotting {metric_name}: {str(e)}")
 
 def plot_training_metrics(agent):
     """Plot training metrics using matplotlib"""
@@ -281,8 +284,8 @@ def plot_training_metrics(metrics_history):
     ax1 = fig.add_subplot(gs[0, :])
     if len(metrics_history['value_loss']) > 0:
         ax1.plot(metrics_history['value_loss'], label='Value Loss', color='blue')
-    if len(metrics_history['policy_gradient_loss']) > 0:
-        ax1.plot(metrics_history['policy_gradient_loss'], label='Policy Loss', color='red')
+    if len(metrics_history['policy_loss']) > 0:
+        ax1.plot(metrics_history['policy_loss'], label='Policy Loss', color='red')
     ax1.axhline(y=0.5, color='r', linestyle='--', alpha=0.3, label='Warning Threshold')
     ax1.fill_between(range(len(metrics_history['value_loss'])), 0, 0.5, 
                      color='green', alpha=0.1, label='Good Range')
@@ -326,85 +329,6 @@ def plot_training_metrics(metrics_history):
     plt.tight_layout()
     return fig
 
-def create_training_dashboard():
-    """Create a training monitoring dashboard"""
-    st.subheader("Training Dashboard")
-    
-    # Training Parameters
-    st.subheader("Training Parameters")
-    col1, col2 = st.columns(2)
-    with col1:
-        learning_rate = st.number_input(
-            "Learning Rate", 
-            min_value=1e-6, 
-            max_value=1e-2, 
-            value=3e-4, 
-            format="%.0e",
-            help="How quickly the agent learns (smaller = more stable but slower)"
-        )
-        n_steps = st.number_input(
-            "Steps per Update", 
-            min_value=512, 
-            max_value=8192, 
-            value=2048,
-            help="Number of steps to run before updating policy"
-        )
-    
-    with col2:
-        n_epochs = st.number_input(
-            "Number of Epochs", 
-            min_value=1, 
-            max_value=20, 
-            value=10,
-            help="How many times to reuse each batch of data"
-        )
-        clip_range = st.number_input(
-            "Clip Range", 
-            min_value=0.1, 
-            max_value=0.5, 
-            value=0.2,
-            help="How much the policy can change in one update"
-        )
-    
-    # Live Metrics
-    st.subheader("Training Metrics")
-    metrics_cols = st.columns(4)
-    metric_placeholders = {
-        'reward': metrics_cols[0].empty(),
-        'explained_var': metrics_cols[1].empty(),
-        'policy_loss': metrics_cols[2].empty(),
-        'value_loss': metrics_cols[3].empty()
-    }
-    
-    # Training Progress
-    st.subheader("Training Progress")
-    progress_container = st.container()
-    progress_bar = progress_container.progress(0)
-    status_text = progress_container.empty()
-    
-    # Metrics History
-    metrics_history = {
-        'value_loss': [], 'policy_gradient_loss': [], 
-        'explained_variance': [], 'approx_kl': [],
-        'fps': [], 'entropy_loss': []
-    }
-    
-    # Plots
-    plots_container = st.container()
-    
-    return {
-        'parameters': {
-            'learning_rate': learning_rate,
-            'n_steps': n_steps,
-            'n_epochs': n_epochs,
-            'clip_range': clip_range
-        },
-        'metric_placeholders': metric_placeholders,
-        'progress_bar': progress_bar,
-        'status_text': status_text,
-        'metrics_history': metrics_history,
-        'plots_container': plots_container
-    }
 
 def plot_model_performance(reactor_number, target):
     """Plot actual vs predicted values from test data"""
@@ -586,7 +510,7 @@ def main():
     
     if st.session_state.training_started:
         try:
-            # Create callback with all UI elements
+            # Create callback with metric charts
             callback = TrainingCallback(
                 total_steps=params['total_steps'],
                 metric_charts=metric_charts,
@@ -609,12 +533,21 @@ def main():
             st.session_state.training_started = False
             st.sidebar.success(f"Training completed in {agent.training_time:.1f} seconds!")
             
+        except ValueError as ve:
+            st.error(f"Invalid parameter: {str(ve)}")
         except Exception as e:
-            st.session_state.training_started = False
-            st.sidebar.error(f"Training error: {str(e)}")
+            st.error(f"Error during training: {str(e)}")
             logging.exception("Training error details:")
+            
+        # Analyze metrics from the callback
+        if hasattr(callback, 'metrics_history'):
+            recommendations = analyze_training_metrics(callback.metrics_history)
+            if recommendations:
+                st.subheader("Training Recommendations")
+                for rec in recommendations:
+                    st.markdown(rec)
 
-    if st.button("Show Training Metrics"):
+    if st.button("Show Training Metrics", key="show_metrics_button"):
         if hasattr(agent, 'training_metrics') and agent.training_metrics['timesteps']:
             st.write("### Training Metrics")
             
@@ -645,7 +578,7 @@ def main():
         else:
             st.warning("No training metrics available. Please train the agent first.")
 
-    if st.button("Show Training Complexity Analysis"):
+    if st.button("Show Training Complexity Analysis", key="show_complexity_button"):
         if hasattr(agent, 'training_metrics') and agent.training_metrics['steps_per_second']:
             st.write("**Complexity Metrics:**")
             st.write(f"- Number of Active Parameters: {agent.complexity_metrics['action_space_size']}")
@@ -661,8 +594,6 @@ def main():
             st.write(f"- Search Space Coverage: {exploration_coverage:.2%}")
             st.write(f"- Average Steps/Second: {np.mean(agent.training_metrics['steps_per_second']):.1f}")
             
-            # Show visualization
-            st.pyplot(plot_training_complexity(agent))
         else:
             st.warning("No training metrics available. Please train the agent first.")
 
@@ -749,7 +680,7 @@ def main():
     with tabs[2]:
         st.header("Parameter Optimization")
         
-        if st.button("Get Optimization Suggestions"):
+        if st.button("Get Optimization Suggestions", key="get_suggestions_button"):
             # Get current state and suggestions
             current_state = {param: new_values.get(param, env.state[i]) 
                            for i, param in enumerate(env.parameter_names)}
@@ -832,118 +763,28 @@ def main():
             )
             
             # Add button to apply suggestions
-            if st.button("Apply Suggested Values"):
+            if st.button("Apply Suggested Values", key="apply_values_button"):
                 for param, value in suggestions.items():
                     new_values[param] = value
                 st.success("Applied suggested values! You can view them in the Parameter Control tab.")
-
-    # Training section in sidebar
-    with st.sidebar.expander("Agent Training", expanded=True):
-        st.subheader("Training Parameters")
+    
+    # Create sliders for manual parameter adjustment
+    new_values = {}
+    for full_param in env.full_parameter_config:
+        min_val, max_val = env.full_parameter_config[full_param]
         
-        # Training parameters
-        learning_rate = st.select_slider(
-            "Learning Rate",
-            options=[1e-5, 3e-5, 1e-4, 3e-4, 1e-3],
-            value=1e-4,
-            help="Smaller = more stable but slower learning",
-            key="sidebar_learning_rate"
+        # Ensure min and max are different
+        if min_val == max_val:
+            max_val = min_val + 1.0
+        
+        current_val = env.full_state[list(env.full_parameter_config.keys()).index(full_param)]
+        new_values[full_param] = st.slider(
+            full_param,
+            min_value=float(min_val),
+            max_value=float(max_val),
+            value=float(current_val),
+            step=0.01
         )
-        
-        n_steps = st.select_slider(
-            "Steps per Update",
-            options=[1024, 2048, 4096, 8192],
-            value=4096,
-            help="Larger = more stable learning",
-            key="sidebar_n_steps"
-        )
-        
-        n_epochs = st.slider(
-            "Number of Epochs",
-            min_value=3,
-            max_value=10,
-            value=5,
-            help="How many times to reuse each batch of data",
-            key="sidebar_n_epochs"
-        )
-        
-        clip_range = st.select_slider(
-            "Clip Range",
-            options=[0.1, 0.15, 0.2, 0.25, 0.3],
-            value=0.15,
-            help="Smaller = more stable updates",
-            key="sidebar_clip_range"
-        )
-        
-        timesteps = st.select_slider(
-            "Training Timesteps",
-            options=[50000, 100000, 200000, 500000],
-            value=100000,
-            help="Total number of training steps",
-            key="sidebar_timesteps"
-        )
-        
-        # Try to load pre-trained agent
-        model_path = f"models/rl_agent_reactor_{reactor_number}_multi"
-        try:
-            agent.load(model_path)
-            st.success("Loaded trained agent")
-        except:
-            st.warning("No trained agent found. Using untrained agent.")
-
-        if st.button("Train Agent"):
-            # Create a new tab for training
-            training_tab = st.tabs(["Training Progress"])[0]
-            with training_tab:
-                dashboard = create_training_dashboard()
-                try:
-                    with st.spinner("Configuring agent..."):
-                        # Validate parameters
-                        lr = float(learning_rate)
-                        steps = int(n_steps)
-                        epochs = int(n_epochs)
-                        clip = float(clip_range)
-                        total_steps = int(timesteps)
-                        
-                        if lr <= 0:
-                            raise ValueError("Learning rate must be positive")
-                        if steps <= 0:
-                            raise ValueError("Steps must be positive")
-                        if epochs <= 0:
-                            raise ValueError("Epochs must be positive")
-                        if clip <= 0:
-                            raise ValueError("Clip range must be positive")
-                        
-                        # Configure agent with validated parameters
-                        agent.configure_training(
-                            learning_rate=lr,
-                            n_steps=steps,
-                            n_epochs=epochs,
-                            clip_range=clip
-                        )
-                    
-                    # Create callback with dashboard
-                    callback = TrainingCallback(dashboard)
-                    
-                    with st.spinner("Training agent..."):
-                        # Train agent
-                        agent.train(total_timesteps=total_steps, callback=callback)
-                        agent.save(model_path)
-                    
-                    st.success("Training completed successfully!")
-                    
-                except ValueError as ve:
-                    st.error(f"Invalid parameter: {str(ve)}")
-                except Exception as e:
-                    st.error(f"Error during training: {str(e)}")
-                    logging.exception("Training error details:")
-                    
-            recommendations = analyze_training_metrics(dashboard['metrics_history'])
-            if recommendations:
-                st.subheader("Training Recommendations")
-                for rec in recommendations:
-                    st.markdown(rec)
-
 
 if __name__ == "__main__":
     main()

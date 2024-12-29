@@ -82,23 +82,35 @@ class ReactorOptimizationAgent:
             # Wrap environment for stable-baselines
             self.env = DummyVecEnv([lambda: self.raw_env])
             
-            # Create PPO model with scaled architecture
+            # Create PPO model with modified parameters
             self.model = PPO(
-            "MlpPolicy",
-            self.env,
-            learning_rate=learning_rate,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            n_epochs=n_epochs,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            policy_kwargs=dict(
-                net_arch=net_arch,
-                log_std_init=exploration_noise  # Adjusted exploration noise
-            ),
-            verbose=1
-        )
+                "MlpPolicy",
+                self.env,
+                learning_rate=3e-5,
+                n_steps=2048,
+                batch_size=128,
+                n_epochs=10,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                clip_range_vf=None,
+                normalize_advantage=True,
+                ent_coef=0.01,  # Increased entropy coefficient for more exploration
+                vf_coef=0.5,
+                max_grad_norm=0.5,
+                use_sde=True,  # Enable State Dependent Exploration
+                sde_sample_freq=4,  # Sample frequency for SDE
+                policy_kwargs=dict(
+                    log_std_init=-2.0,  # Initial std
+                    ortho_init=True,
+                    activation_fn=torch.nn.ReLU,
+                    net_arch=dict(
+                        pi=[64, 64],  # Policy network
+                        vf=[64, 64]   # Value network
+                    )
+                ),
+                verbose=1
+            )
             
             # Log detailed configuration
             logging.info("=" * 50)
